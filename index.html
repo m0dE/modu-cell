@@ -6,43 +6,81 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        #game-container { position: relative; }
         canvas { border: 2px solid #333; }
+        #minimap {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            border: 2px solid #555;
+            background: rgba(0,0,0,0.7);
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
-    <canvas id="game" width="1400" height="900"></canvas>
+    <div id="game-container">
+        <canvas id="game" width="1400" height="900"></canvas>
+        <canvas id="minimap" width="200" height="200"></canvas>
+    </div>
 
 <script>
 // Load SDK based on environment
 (function() {
     const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     const script = document.createElement('script');
-    
+
     if (isLocalhost) {
-        script.src = '../dist/modu.iife.js?v=dev';
+        script.src = 'http://localhost:3001/dist/modu.iife.js?v=dev';
     } else {
         // Use production CDN with dynamic version for cache busting
         const version = Date.now();
-        script.src = `https://cdn.moduengine.com/modu-network.min.js?v=${version}`;
+        script.src = `https://cdn.moduengine.com/modu.min.js?v=${version}`;
     }
-    
+
+    script.onload = initGame;
     document.head.appendChild(script);
 })();
-</script>
-<script>
+
+function initGame() {
 const canvas = document.getElementById('game');
+const minimapCanvas = document.getElementById('minimap');
+const minimapCtx = minimapCanvas.getContext('2d');
 const WIDTH = canvas.width, HEIGHT = canvas.height;
+
+// World size (huge map!)
+const WORLD_WIDTH = 6000;
+const WORLD_HEIGHT = 6000;
 
 // Create game with plugins
 const game = createGame();
-game.addPlugin(Simple2DRenderer, canvas);
+const renderer = game.addPlugin(Simple2DRenderer, canvas);
 const physics = game.addPlugin(Physics2DSystem, { gravity: { x: 0, y: 0 } });
 window.game = game;
 
+// Local client ID (interned number)
+let localClientId = null;
+
+// Camera state
+const camera = {
+    x: WORLD_WIDTH / 2,
+    y: WORLD_HEIGHT / 2,
+    zoom: 1,
+    targetX: WORLD_WIDTH / 2,
+    targetY: WORLD_HEIGHT / 2,
+    targetZoom: 1,
+    smoothing: 0.08  // Camera follow smoothing
+};
+
+// Zoom settings based on player size
+const BASE_ZOOM = 1.0;
+const MIN_ZOOM = 0.35;
+const ZOOM_SCALE_FACTOR = 0.004;  // How much zoom decreases per radius unit
+
 // Game constants
-const SPEED = 5, INITIAL_RADIUS = 20, MAX_RADIUS = 150;
+const SPEED = 5, INITIAL_RADIUS = 20, MAX_RADIUS = 200;
 const EAT_RATIO = 1.2, FOOD_GROW = 0.05, PLAYER_GROW = 0.3;
-const FOOD_COUNT = 60, MAX_FOOD = 100, FOOD_SPAWN_CHANCE = 0.05;
+const FOOD_COUNT = 200, MAX_FOOD = 400, FOOD_SPAWN_CHANCE = 0.08;
 
 // Color palette (fixed set to avoid unbounded string interning)
 const COLORS = [
@@ -94,8 +132,8 @@ function spawnFood() {
     const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
     const color = game.internString('color', colorStr);
     game.spawn('food', {
-        x: 50 + (dRandom() * (WIDTH - 100)) | 0,
-        y: 50 + (dRandom() * (HEIGHT - 100)) | 0,
+        x: 50 + (dRandom() * (WORLD_WIDTH - 100)) | 0,
+        y: 50 + (dRandom() * (WORLD_HEIGHT - 100)) | 0,
         color
     });
 }
@@ -106,14 +144,14 @@ function spawnCell(clientId) {
     const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
     const color = game.internString('color', colorStr);
     game.spawn('cell', {
-        x: 100 + (dRandom() * (WIDTH - 200)) | 0,
-        y: 100 + (dRandom() * (HEIGHT - 200)) | 0,
+        x: 100 + (dRandom() * (WORLD_WIDTH - 200)) | 0,
+        y: 100 + (dRandom() * (WORLD_HEIGHT - 200)) | 0,
         clientId,
         color
     });
 }
 
-// Movement system - uses deterministic helpers
+// Movement system - all cells move towards cursor world position
 game.addSystem(() => {
     for (const cell of game.query('cell')) {
         const player = cell.get(Player);
@@ -132,9 +170,240 @@ game.addSystem(() => {
     }
 }, { phase: 'update' });
 
-// Input - just define actions, plugin handles the rest
+// Camera update system
+game.addSystem(() => {
+    if (localClientId === null) return;
+
+    const localPlayer = game.world.getEntityByClientId(localClientId);
+    if (localPlayer && !localPlayer.destroyed) {
+        const transform = localPlayer.get(Transform2D);
+        const sprite = localPlayer.get(Sprite);
+
+        // Smooth camera follow
+        camera.x += (transform.x - camera.x) * 0.15;
+        camera.y += (transform.y - camera.y) * 0.15;
+
+        // Smooth zoom
+        camera.targetZoom = Math.max(MIN_ZOOM, BASE_ZOOM - (sprite.radius - INITIAL_RADIUS) * ZOOM_SCALE_FACTOR);
+        camera.zoom += (camera.targetZoom - camera.zoom) * camera.smoothing;
+    }
+}, { phase: 'update' });
+
+// Input - send cursor world position
 const input = game.addPlugin(InputPlugin, canvas);
-input.action('target', { type: 'vector', bindings: ['mouse'] });
+
+// Track mouse position
+let mouseX = WIDTH / 2, mouseY = HEIGHT / 2;
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+});
+
+// Custom binding converts mouse screen position to world position
+input.action('target', {
+    type: 'vector',
+    bindings: [() => {
+        // Convert screen position to world position using camera
+        const worldX = (mouseX - WIDTH / 2) / camera.zoom + camera.x;
+        const worldY = (mouseY - HEIGHT / 2) / camera.zoom + camera.y;
+        return { x: worldX, y: worldY };
+    }]
+});
+
+// Convert world coordinates to screen coordinates (for rendering)
+function worldToScreen(worldX, worldY) {
+    return {
+        x: (worldX - camera.x) * camera.zoom + WIDTH / 2,
+        y: (worldY - camera.y) * camera.zoom + HEIGHT / 2
+    };
+}
+
+// Update camera to follow player
+function updateCamera() {
+    const localPlayer = game.world.getEntityByClientId(localClientId);
+    if (localPlayer && !localPlayer.destroyed) {
+        const transform = localPlayer.get(Transform2D);
+        const sprite = localPlayer.get(Sprite);
+
+        // Target camera position on player
+        camera.targetX = transform.x;
+        camera.targetY = transform.y;
+
+        // Calculate zoom based on player size (zoom out as they grow)
+        camera.targetZoom = Math.max(MIN_ZOOM, BASE_ZOOM - (sprite.radius - INITIAL_RADIUS) * ZOOM_SCALE_FACTOR);
+    }
+
+    // Smooth camera follow
+    camera.x += (camera.targetX - camera.x) * camera.smoothing;
+    camera.y += (camera.targetY - camera.y) * camera.smoothing;
+    camera.zoom += (camera.targetZoom - camera.zoom) * camera.smoothing;
+}
+
+// Custom render function with camera transforms
+function renderWithCamera() {
+    const ctx = renderer.context;
+    const alpha = game.getRenderAlpha();
+
+    // Get interpolated camera position from player
+    let camX = camera.x, camY = camera.y;
+    if (localClientId !== null) {
+        const player = game.world.getEntityByClientId(localClientId);
+        if (player && !player.destroyed && player.render) {
+            player.interpolate(alpha);
+            camX = player.render.interpX;
+            camY = player.render.interpY;
+        }
+    }
+
+    // Clear canvas
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    // Draw world boundary (visible grid/border)
+    ctx.save();
+    ctx.translate(WIDTH / 2, HEIGHT / 2);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camX, -camY);
+
+    // Draw grid
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = 1 / camera.zoom;
+    const gridSize = 100;
+    const startX = Math.floor((camX - WIDTH / 2 / camera.zoom) / gridSize) * gridSize;
+    const startY = Math.floor((camY - HEIGHT / 2 / camera.zoom) / gridSize) * gridSize;
+    const endX = camX + WIDTH / 2 / camera.zoom;
+    const endY = camY + HEIGHT / 2 / camera.zoom;
+
+    for (let x = startX; x <= endX; x += gridSize) {
+        if (x >= 0 && x <= WORLD_WIDTH) {
+            ctx.beginPath();
+            ctx.moveTo(x, Math.max(0, startY));
+            ctx.lineTo(x, Math.min(WORLD_HEIGHT, endY));
+            ctx.stroke();
+        }
+    }
+    for (let y = startY; y <= endY; y += gridSize) {
+        if (y >= 0 && y <= WORLD_HEIGHT) {
+            ctx.beginPath();
+            ctx.moveTo(Math.max(0, startX), y);
+            ctx.lineTo(Math.min(WORLD_WIDTH, endX), y);
+            ctx.stroke();
+        }
+    }
+
+    // Draw world boundary
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 4 / camera.zoom;
+    ctx.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+    // Collect and sort entities by layer
+    const entities = [];
+    for (const entity of game.getAllEntities()) {
+        if (entity.destroyed) continue;
+        try {
+            const sprite = entity.get(Sprite);
+            if (sprite && sprite.visible) {
+                entity.interpolate(alpha);
+                entities.push({ entity, layer: sprite.layer });
+            }
+        } catch {}
+    }
+    entities.sort((a, b) => a.layer - b.layer);
+
+    // Draw entities
+    for (const { entity } of entities) {
+        const sprite = entity.get(Sprite);
+        const x = entity.render.interpX + sprite.offsetX;
+        const y = entity.render.interpY + sprite.offsetY;
+
+        // Frustum culling - skip entities outside view
+        const screenPos = worldToScreen(x, y);
+        const screenRadius = sprite.radius * camera.zoom;
+        if (screenPos.x + screenRadius < 0 || screenPos.x - screenRadius > WIDTH ||
+            screenPos.y + screenRadius < 0 || screenPos.y - screenRadius > HEIGHT) {
+            continue;
+        }
+
+        const colorStr = game.getString('color', sprite.color) || '#fff';
+        ctx.fillStyle = colorStr;
+
+        if (sprite.shape === SHAPE_CIRCLE) {
+            ctx.beginPath();
+            ctx.arc(x, y, sprite.radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+
+    // Draw minimap
+    renderMinimap();
+}
+
+// Render minimap
+function renderMinimap() {
+    const mmW = minimapCanvas.width;
+    const mmH = minimapCanvas.height;
+    const scaleX = mmW / WORLD_WIDTH;
+    const scaleY = mmH / WORLD_HEIGHT;
+
+    // Clear minimap
+    minimapCtx.fillStyle = 'rgba(17, 17, 17, 0.9)';
+    minimapCtx.fillRect(0, 0, mmW, mmH);
+
+    // Draw world border
+    minimapCtx.strokeStyle = '#333';
+    minimapCtx.lineWidth = 1;
+    minimapCtx.strokeRect(0, 0, mmW, mmH);
+
+    // Draw all entities on minimap
+    for (const entity of game.getAllEntities()) {
+        if (entity.destroyed) continue;
+        try {
+            const sprite = entity.get(Sprite);
+            if (!sprite || !sprite.visible) continue;
+
+            const transform = entity.get(Transform2D);
+            const x = transform.x * scaleX;
+            const y = transform.y * scaleY;
+            const radius = Math.max(2, sprite.radius * scaleX);
+
+            const colorStr = game.getString('color', sprite.color) || '#fff';
+            minimapCtx.fillStyle = colorStr;
+            minimapCtx.beginPath();
+            minimapCtx.arc(x, y, radius, 0, Math.PI * 2);
+            minimapCtx.fill();
+        } catch {}
+    }
+
+    // Draw camera viewport on minimap
+    const viewLeft = (camera.x - WIDTH / 2 / camera.zoom) * scaleX;
+    const viewTop = (camera.y - HEIGHT / 2 / camera.zoom) * scaleY;
+    const viewWidth = (WIDTH / camera.zoom) * scaleX;
+    const viewHeight = (HEIGHT / camera.zoom) * scaleY;
+
+    minimapCtx.strokeStyle = '#fff';
+    minimapCtx.lineWidth = 1;
+    minimapCtx.strokeRect(viewLeft, viewTop, viewWidth, viewHeight);
+
+    // Highlight local player on minimap
+    const localPlayer = game.world.getEntityByClientId(localClientId);
+    if (localPlayer && !localPlayer.destroyed) {
+        const transform = localPlayer.get(Transform2D);
+        const x = transform.x * scaleX;
+        const y = transform.y * scaleY;
+
+        minimapCtx.strokeStyle = '#fff';
+        minimapCtx.lineWidth = 2;
+        minimapCtx.beginPath();
+        minimapCtx.arc(x, y, 5, 0, Math.PI * 2);
+        minimapCtx.stroke();
+    }
+}
+
+// Replace the default renderer with our camera-aware one
+renderer.render = renderWithCamera;
 
 // Connect - no render callback needed, Simple2DRenderer handles it
 game.connect('cell-eater-ecs', {
@@ -142,7 +411,18 @@ game.connect('cell-eater-ecs', {
         for (let i = 0; i < FOOD_COUNT; i++) spawnFood();
     },
     onConnect(clientId) {
+        // Store local client ID (interned)
+        if (localClientId === null) {
+            localClientId = game.internClientId(clientId);
+        }
         spawnCell(clientId);
+        // Initialize camera to player position immediately
+        const player = game.getEntityByClientId(clientId);
+        if (player) {
+            const t = player.get(Transform2D);
+            camera.x = camera.targetX = t.x;
+            camera.y = camera.targetY = t.y;
+        }
     },
     onDisconnect(clientId) {
         game.getEntityByClientId(clientId)?.destroy();
@@ -150,6 +430,7 @@ game.connect('cell-eater-ecs', {
 });
 
 Modu.enableDebugUI(game);
+}
 </script>
 </body>
 </html>
