@@ -76,7 +76,7 @@ export type { GameCallbacks } from './game';
 // ============================================
 // Plugins
 // ============================================
-export { Simple2DRenderer, Simple2DRendererOptions } from './plugins/simple-2d-renderer';
+export { Simple2DRenderer, Simple2DRenderer as AutoRenderer, Simple2DRendererOptions } from './plugins/simple-2d-renderer';
 export { InputPlugin } from './plugins/input-plugin';
 export { CameraSystem, CameraSystemOptions } from './plugins/camera-system';
 export { enableDebugUI, DebugUITarget } from './plugins/debug-ui';
