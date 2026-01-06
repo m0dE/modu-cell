@@ -1401,9 +1401,35 @@ export class Game {
     ): void {
         const lines: string[] = [];
         const lastGoodFrame = this.lastGoodSnapshot?.frame ?? 0;
+        const myClientId = this.localClientIdStr || '';
+
+        // Build client legend (assign P1, P2, etc.)
+        const clientIds = new Set<string>();
+        for (const input of inputs) {
+            clientIds.add(input.clientId);
+        }
+        const clientList = Array.from(clientIds);
+        const clientLabels = new Map<string, string>();
+        clientList.forEach((cid, i) => {
+            const label = cid === myClientId ? 'ME' : `P${i + 1}`;
+            clientLabels.set(cid, label);
+        });
+
+        // Try to find entity owners (entities with Player component)
+        const entityOwners = new Map<number, string>();
+        for (const entity of this.world.getAllEntities()) {
+            if (entity.has(Player)) {
+                const playerData = entity.get(Player);
+                const ownerClientId = this.numToClientId.get(playerData.clientId);
+                if (ownerClientId) {
+                    entityOwners.set(entity.eid, clientLabels.get(ownerClientId) || ownerClientId.slice(0, 8));
+                }
+            }
+        }
 
         lines.push(`=== DIVERGENCE DEBUG DATA ===`);
-        lines.push(`Frame: ${frame} | Last good: ${lastGoodFrame} | Client: ${this.localClientIdStr?.slice(0, 8)} | Authority: ${this.checkIsAuthority()}`);
+        lines.push(`Frame: ${frame} | Last good: ${lastGoodFrame} | Authority: ${this.checkIsAuthority()}`);
+        lines.push(`Clients: ${clientList.map(cid => `${clientLabels.get(cid)}=${cid.slice(0, 8)}`).join(', ')}`);
         lines.push(``);
 
         lines.push(`DIVERGENT FIELDS (${diffs.length}):`);
@@ -1411,13 +1437,16 @@ export class Game {
             const delta = typeof d.local === 'number' && typeof d.server === 'number'
                 ? ` Δ${d.local - d.server}`
                 : '';
-            lines.push(`  ${d.entity}#${d.eid.toString(16)}.${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
+            const owner = entityOwners.get(d.eid);
+            const ownerStr = owner ? ` [${owner}]` : '';
+            lines.push(`  ${d.entity}#${d.eid.toString(16)}${ownerStr}.${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
         }
         lines.push(``);
 
         lines.push(`INPUTS (${inputs.length}):`);
         for (const input of inputs) {
-            lines.push(`  f${input.frame} ${input.clientId.slice(0, 8)}: ${JSON.stringify(input.data)}`);
+            const label = clientLabels.get(input.clientId) || input.clientId.slice(0, 8);
+            lines.push(`  f${input.frame} [${label}]: ${JSON.stringify(input.data)}`);
         }
         lines.push(``);
 

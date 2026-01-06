@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-06T21:54:21.112Z - Commit: 5f37381 */
+/* Modu Engine - Built: 2026-01-06T21:55:58.587Z - Commit: 5079bd6 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -5455,18 +5455,43 @@ var Modu = (() => {
     showDivergenceDiff(diffs, inputs, frame) {
       const lines = [];
       const lastGoodFrame = this.lastGoodSnapshot?.frame ?? 0;
+      const myClientId = this.localClientIdStr || "";
+      const clientIds = /* @__PURE__ */ new Set();
+      for (const input of inputs) {
+        clientIds.add(input.clientId);
+      }
+      const clientList = Array.from(clientIds);
+      const clientLabels = /* @__PURE__ */ new Map();
+      clientList.forEach((cid, i) => {
+        const label = cid === myClientId ? "ME" : `P${i + 1}`;
+        clientLabels.set(cid, label);
+      });
+      const entityOwners = /* @__PURE__ */ new Map();
+      for (const entity of this.world.getAllEntities()) {
+        if (entity.has(Player)) {
+          const playerData = entity.get(Player);
+          const ownerClientId = this.numToClientId.get(playerData.clientId);
+          if (ownerClientId) {
+            entityOwners.set(entity.eid, clientLabels.get(ownerClientId) || ownerClientId.slice(0, 8));
+          }
+        }
+      }
       lines.push(`=== DIVERGENCE DEBUG DATA ===`);
-      lines.push(`Frame: ${frame} | Last good: ${lastGoodFrame} | Client: ${this.localClientIdStr?.slice(0, 8)} | Authority: ${this.checkIsAuthority()}`);
+      lines.push(`Frame: ${frame} | Last good: ${lastGoodFrame} | Authority: ${this.checkIsAuthority()}`);
+      lines.push(`Clients: ${clientList.map((cid) => `${clientLabels.get(cid)}=${cid.slice(0, 8)}`).join(", ")}`);
       lines.push(``);
       lines.push(`DIVERGENT FIELDS (${diffs.length}):`);
       for (const d of diffs) {
         const delta = typeof d.local === "number" && typeof d.server === "number" ? ` \u0394${d.local - d.server}` : "";
-        lines.push(`  ${d.entity}#${d.eid.toString(16)}.${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
+        const owner = entityOwners.get(d.eid);
+        const ownerStr = owner ? ` [${owner}]` : "";
+        lines.push(`  ${d.entity}#${d.eid.toString(16)}${ownerStr}.${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
       }
       lines.push(``);
       lines.push(`INPUTS (${inputs.length}):`);
       for (const input of inputs) {
-        lines.push(`  f${input.frame} ${input.clientId.slice(0, 8)}: ${JSON.stringify(input.data)}`);
+        const label = clientLabels.get(input.clientId) || input.clientId.slice(0, 8);
+        lines.push(`  f${input.frame} [${label}]: ${JSON.stringify(input.data)}`);
       }
       lines.push(``);
       if (this.lastGoodSnapshot) {
@@ -6486,7 +6511,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "5f37381";
+  var ENGINE_VERSION = "5079bd6";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
