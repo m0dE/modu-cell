@@ -6,7 +6,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "build:browser": "node build-browser.js"
+    "build:browser": "node build-browser.js",
+    "dev": "node build.js --watch --serve",
+    "watch": "node build.js --watch"
   },
   "keywords": [
     "physics",
