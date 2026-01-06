@@ -99,6 +99,15 @@ export declare class Game {
     private lastSnapshotEntityCount;
     /** Drift tracking stats for debug UI */
     private driftStats;
+    /** Divergence tracking */
+    private lastSyncPercent;
+    private firstDivergenceFrame;
+    private divergenceHistory;
+    private recentInputs;
+    private lastServerSnapshot;
+    private lastGoodSnapshot;
+    private divergenceCaptured;
+    private divergenceCapture;
     /** Tick timing for render interpolation */
     private lastTickTime;
     private tickIntervalMs;
@@ -279,6 +288,14 @@ export declare class Game {
      * Compare server snapshot fields with local state for drift tracking.
      */
     private compareSnapshotFields;
+    /**
+     * Show divergence debug data (auto-called on first divergence).
+     */
+    private showDivergenceDiff;
+    /**
+     * Download divergence replay data as JSON.
+     */
+    getDivergenceReplay(): void;
     /**
      * Start the render loop.
      */
