@@ -140,8 +140,9 @@ await buildCombinedIIFE(docsDir, 'modu.iife.js');
 await buildMinifiedCombined(docsDir, 'modu.min.js');
 await buildESM(docsDir, 'modu.js');
 
-// Build to dist (for examples)
+// Build to dist (for examples and CDN)
 await buildCombinedIIFE(distDir, 'modu.iife.js');
+await buildMinifiedCombined(distDir, 'modu.min.js');
 await buildESM(distDir, 'modu.js');
 
 console.log('\nBuild complete!');
