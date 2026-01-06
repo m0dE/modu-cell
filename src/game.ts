@@ -179,6 +179,26 @@ export class Game {
         totalFieldCount: 0
     };
 
+    /** Divergence tracking */
+    private lastSyncPercent: number = 100;
+    private firstDivergenceFrame: number | null = null;
+    private divergenceHistory: Array<{ frame: number; field: string; local: any; server: any; delta?: number }> = [];
+    private recentInputs: Array<{ frame: number; seq: number; clientId: string; data: any }> = [];
+    private lastServerSnapshot: { raw: Uint8Array | null; decoded: any; frame: number } = { raw: null, decoded: null, frame: 0 };
+    private lastGoodSnapshot: { snapshot: any; frame: number; hash: string } | null = null;
+    private divergenceCaptured: boolean = false;
+    private divergenceCapture: {
+        lastGoodSnapshot: any;
+        lastGoodFrame: number;
+        inputs: Array<{ frame: number; seq: number; clientId: string; data: any }>;
+        localSnapshot: any;
+        serverSnapshot: any;
+        diffs: Array<{ entity: string; eid: number; comp: string; field: string; local: any; server: any }>;
+        divergenceFrame: number;
+        clientId: string | null;
+        isAuthority: boolean;
+    } | null = null;
+
     /** Tick timing for render interpolation */
     private lastTickTime: number = 0;
     private tickIntervalMs: number = 50; // 20fps default
@@ -698,6 +718,17 @@ export class Game {
 
         const clientId = data?.clientId || input.clientId;
         const type = data?.type;
+
+        // Track input for divergence debugging (keep last 500)
+        this.recentInputs.push({
+            frame: this.currentFrame,
+            seq: input.seq,
+            clientId,
+            data: JSON.parse(JSON.stringify(data))
+        });
+        if (this.recentInputs.length > 500) {
+            this.recentInputs.shift();
+        }
 
         // Track input sequence
         if (input.seq > this.lastInputSeq) {
@@ -1228,9 +1259,13 @@ export class Game {
      * Compare server snapshot fields with local state for drift tracking.
      */
     private compareSnapshotFields(serverSnapshot: any): void {
+        const frame = serverSnapshot.frame;
         let matchingFields = 0;
         let totalFields = 0;
-        const diffs: string[] = [];
+        const diffs: Array<{ entity: string; eid: number; comp: string; field: string; local: any; server: any }> = [];
+
+        // Store server snapshot for debugging
+        this.lastServerSnapshot = { raw: null, decoded: serverSnapshot, frame };
 
         const types = serverSnapshot.types || [];
         const serverEntities = serverSnapshot.entities || [];
@@ -1251,26 +1286,20 @@ export class Game {
             if (!serverEntity) {
                 for (const comp of entity.getComponents()) {
                     totalFields += comp.fieldNames.length;
-                }
-                if (diffs.length < 10) {
-                    diffs.push(`Entity ${eid.toString(16)} (${entity.type}) exists locally but not on server`);
+                    for (const fieldName of comp.fieldNames) {
+                        diffs.push({ entity: entity.type, eid, comp: comp.name, field: fieldName, local: 'EXISTS', server: 'MISSING' });
+                    }
                 }
                 continue;
             }
 
             const [, typeIndex, serverValues] = serverEntity;
-            const serverType = types[typeIndex];
             const typeSchema = schema[typeIndex];
 
-            if (!typeSchema) {
-                // No schema for this type - can't compare
-                continue;
-            }
+            if (!typeSchema) continue;
 
-            // Build index into serverValues based on schema
             let valueIdx = 0;
             for (const [compName, fieldNames] of typeSchema) {
-                // Find matching local component
                 const localComp = entity.getComponents().find(c => c.name === compName);
 
                 for (const fieldName of fieldNames) {
@@ -1283,7 +1312,6 @@ export class Game {
 
                         let valuesMatch = false;
                         if (fieldDef?.type === 'bool') {
-                            // Booleans: local is 0/1, server is true/false or 0/1
                             const localBool = localValue !== 0;
                             const serverBool = serverValue !== 0 && serverValue !== false;
                             valuesMatch = localBool === serverBool;
@@ -1293,8 +1321,8 @@ export class Game {
 
                         if (valuesMatch) {
                             matchingFields++;
-                        } else if (diffs.length < 10) {
-                            diffs.push(`${entity.type}.${compName}.${fieldName}: local=${localValue}, server=${serverValue}`);
+                        } else {
+                            diffs.push({ entity: entity.type, eid, comp: compName, field: fieldName, local: localValue, server: serverValue });
                         }
                     }
                 }
@@ -1307,27 +1335,132 @@ export class Game {
                 const [, typeIndex, serverValues] = serverEntity;
                 const serverType = types[typeIndex] || `type${typeIndex}`;
                 totalFields += serverValues.length;
-                if (diffs.length < 10) {
-                    diffs.push(`Entity ${eid.toString(16)} (${serverType}) exists on server but not locally`);
-                }
+                diffs.push({ entity: serverType, eid, comp: '*', field: '*', local: 'MISSING', server: 'EXISTS' });
             }
         }
+
+        const newPercent = totalFields > 0 ? (matchingFields / totalFields) * 100 : 100;
+        const wasSync = this.lastSyncPercent === 100;
+        const isSync = newPercent === 100;
+
+        // Store good snapshot when 100% sync
+        if (isSync) {
+            this.lastGoodSnapshot = {
+                snapshot: JSON.parse(JSON.stringify(serverSnapshot)),
+                frame: frame,
+                hash: this.getStateHash()
+            };
+        }
+
+        // First divergence - capture debug data and auto-show
+        if (wasSync && !isSync && !this.divergenceCaptured) {
+            this.firstDivergenceFrame = frame;
+            this.divergenceHistory = [];
+            this.divergenceCaptured = true;
+
+            const lastGoodFrame = this.lastGoodSnapshot?.frame ?? 0;
+            const inputsInRange = this.recentInputs.filter(i => i.frame > lastGoodFrame && i.frame <= frame);
+            const localSnapshot = this.world.getState();
+
+            this.divergenceCapture = {
+                lastGoodSnapshot: this.lastGoodSnapshot?.snapshot ?? null,
+                lastGoodFrame: lastGoodFrame,
+                inputs: inputsInRange,
+                localSnapshot: localSnapshot,
+                serverSnapshot: serverSnapshot,
+                diffs: diffs,
+                divergenceFrame: frame,
+                clientId: this.localClientIdStr,
+                isAuthority: this.checkIsAuthority()
+            };
+
+            this.showDivergenceDiff(diffs, inputsInRange, frame);
+        }
+
+        this.lastSyncPercent = newPercent;
 
         // Update drift stats
         this.driftStats.totalChecks++;
         this.driftStats.matchingFieldCount = matchingFields;
         this.driftStats.totalFieldCount = totalFields;
-        this.driftStats.determinismPercent = totalFields > 0
-            ? (matchingFields / totalFields) * 100
-            : 100;
+        this.driftStats.determinismPercent = newPercent;
 
-        // Log diffs if sync is not 100%
-        if (diffs.length > 0 && this.driftStats.determinismPercent < 100) {
-            console.warn(`[ecs] Sync ${matchingFields}/${totalFields} (${this.driftStats.determinismPercent.toFixed(1)}%):`);
-            for (const diff of diffs) {
-                console.warn(`  - ${diff}`);
-            }
+        // Sparse ongoing divergence log (every 60 frames)
+        if (diffs.length > 0 && newPercent < 100 && this.divergenceCaptured && frame % 60 === 0) {
+            console.warn(`[DIVERGENCE] Frame ${frame}: still diverged (${newPercent.toFixed(1)}% sync, first at ${this.firstDivergenceFrame})`);
         }
+    }
+
+    /**
+     * Show divergence debug data (auto-called on first divergence).
+     */
+    private showDivergenceDiff(
+        diffs: Array<{ entity: string; eid: number; comp: string; field: string; local: any; server: any }>,
+        inputs: Array<{ frame: number; seq: number; clientId: string; data: any }>,
+        frame: number
+    ): void {
+        const lines: string[] = [];
+        const lastGoodFrame = this.lastGoodSnapshot?.frame ?? 0;
+
+        lines.push(`=== DIVERGENCE DEBUG DATA ===`);
+        lines.push(`Frame: ${frame} | Last good: ${lastGoodFrame} | Client: ${this.localClientIdStr?.slice(0, 8)} | Authority: ${this.checkIsAuthority()}`);
+        lines.push(``);
+
+        lines.push(`DIVERGENT FIELDS (${diffs.length}):`);
+        for (const d of diffs) {
+            const delta = typeof d.local === 'number' && typeof d.server === 'number'
+                ? ` Δ${d.local - d.server}`
+                : '';
+            lines.push(`  ${d.entity}#${d.eid.toString(16)}.${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
+        }
+        lines.push(``);
+
+        lines.push(`INPUTS (${inputs.length}):`);
+        for (const input of inputs) {
+            lines.push(`  f${input.frame} ${input.clientId.slice(0, 8)}: ${JSON.stringify(input.data)}`);
+        }
+        lines.push(``);
+
+        if (this.lastGoodSnapshot) {
+            const goodEnts = Object.keys(this.lastGoodSnapshot.snapshot.entities || {}).length;
+            lines.push(`LAST GOOD SNAPSHOT (f${lastGoodFrame}): ${goodEnts} entities`);
+        } else {
+            lines.push(`LAST GOOD SNAPSHOT: none (never had 100% sync)`);
+        }
+
+        if (this.lastServerSnapshot.decoded) {
+            const serverEnts = Object.keys(this.lastServerSnapshot.decoded.entities || {}).length;
+            lines.push(`SERVER SNAPSHOT (f${this.lastServerSnapshot.frame}): ${serverEnts} entities`);
+        }
+
+        lines.push(`=== END DEBUG DATA ===`);
+        lines.push(`To get detailed replay data: game.getDivergenceReplay()`);
+
+        console.error(lines.join('\n'));
+    }
+
+    /**
+     * Download divergence replay data as JSON.
+     */
+    getDivergenceReplay(): void {
+        if (!this.divergenceCapture) {
+            console.warn('[REPLAY] No divergence captured yet.');
+            return;
+        }
+
+        const json = JSON.stringify(this.divergenceCapture, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `divergence-${this.divergenceCapture.divergenceFrame}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        console.log(`[REPLAY] Downloaded (${(json.length / 1024).toFixed(1)} KB)`);
     }
 
     // ==========================================
