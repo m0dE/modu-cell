@@ -304,6 +304,28 @@ unregister();  // Remove the system
 
 ## State Methods
 
+### `game.frame`
+
+Get the current simulation frame number.
+
+```javascript
+const frame = game.frame;
+```
+
+### `game.time`
+
+Get deterministic time in milliseconds (frame * tick interval). Use this instead of `Date.now()` for game logic to maintain determinism.
+
+```javascript
+const RESPAWN_TIME = 3000; // 3 seconds
+deadPlayers.set(clientId, game.time + RESPAWN_TIME);
+
+// Later, check if respawn time has passed
+if (game.time >= respawnTime) {
+    spawnPlayer(clientId);
+}
+```
+
 ### `game.localClientId`
 
 The local client's ID (string).
@@ -322,14 +344,6 @@ Get all connected client IDs.
 for (const clientId of game.getClients()) {
     console.log('Connected:', clientId);
 }
-```
-
-### `game.frame`
-
-Get the current simulation frame number.
-
-```javascript
-const frame = game.frame;
 ```
 
 ### `game.getStateHash()`

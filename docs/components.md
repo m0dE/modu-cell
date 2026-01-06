@@ -43,12 +43,17 @@ body.bodyType = BODY_KINEMATIC;
 | `vx` | number | 0 | Velocity X |
 | `vy` | number | 0 | Velocity Y |
 | `angularVelocity` | number | 0 | Rotational velocity |
+| `forceX` | number | 0 | Force accumulator X (added to velocity, then cleared) |
+| `forceY` | number | 0 | Force accumulator Y (added to velocity, then cleared) |
+| `impulseX` | number | 0 | Impulse accumulator X (added to velocity once, then cleared) |
+| `impulseY` | number | 0 | Impulse accumulator Y (added to velocity once, then cleared) |
 | `width` | number | 0 | Box width |
 | `height` | number | 0 | Box height |
 | `radius` | number | 10 | Circle radius |
 | `mass` | number | 1 | Mass for physics |
 | `restitution` | number | 0 | Bounciness (0-1) |
 | `friction` | number | 0 | Surface friction |
+| `damping` | number | 0 | Velocity damping (0-1, applied each frame) |
 | `bodyType` | number | 0 | BODY_DYNAMIC, BODY_STATIC, or BODY_KINEMATIC |
 | `shapeType` | number | 0 | SHAPE_RECT or SHAPE_CIRCLE |
 | `isSensor` | boolean | false | Detect overlaps without collision response |

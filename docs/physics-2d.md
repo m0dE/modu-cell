@@ -59,6 +59,9 @@ game.defineEntity('player')
 | `friction` | number | 0 | Surface friction |
 | `bodyType` | number | 0 | Body type constant |
 | `shapeType` | number | 0 | Shape type constant |
+| `forceX`, `forceY` | number | 0 | Force accumulator (cleared each frame) |
+| `impulseX`, `impulseY` | number | 0 | Impulse accumulator (cleared each frame) |
+| `damping` | number | 0 | Velocity damping factor |
 | `isSensor` | boolean | false | Trigger mode |
 
 ## Body Types
@@ -193,6 +196,88 @@ const body = entity.get(Body2D);
 body.vx = 10;
 body.vy = 5;
 ```
+
+## Forces and Impulses
+
+The physics system supports applying forces and impulses through Body2D component fields.
+
+### Forces vs Impulses
+
+| Type | Use Case | Behavior |
+|------|----------|----------|
+| **Force** | Continuous effects (thrust, wind) | Added to velocity each frame, then cleared |
+| **Impulse** | Instant effects (jump, knockback) | Added to velocity once, then cleared |
+
+### Applying Force
+
+Forces are applied continuously - set them each frame for ongoing effects:
+
+```javascript
+// Thrust in direction entity is facing
+game.addSystem(() => {
+    for (const entity of game.query('ship')) {
+        if (entity.input?.thrust) {
+            const body = entity.get(Body2D);
+            const transform = entity.get(Transform2D);
+            const thrustPower = 0.5;
+
+            body.forceX = Math.cos(transform.angle) * thrustPower;
+            body.forceY = Math.sin(transform.angle) * thrustPower;
+        }
+    }
+}, { phase: 'update' });
+```
+
+### Applying Impulse
+
+Impulses are one-shot velocity changes - set once for instant effects:
+
+```javascript
+// Jump impulse
+function jump(entity) {
+    const body = entity.get(Body2D);
+    body.impulseY = -15;  // Instant upward velocity
+}
+
+// Knockback on collision
+physics.onCollision('player', 'enemy', (player, enemy) => {
+    const playerBody = player.get(Body2D);
+    const playerPos = player.get(Transform2D);
+    const enemyPos = enemy.get(Transform2D);
+
+    // Direction away from enemy
+    const dx = playerPos.x - enemyPos.x;
+    const dy = playerPos.y - enemyPos.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    // Apply knockback impulse
+    playerBody.impulseX = (dx / len) * 10;
+    playerBody.impulseY = (dy / len) * 10;
+});
+```
+
+### Damping
+
+Damping reduces velocity over time (like friction or drag):
+
+```javascript
+game.defineEntity('spaceship')
+    .with(Transform2D)
+    .with(Body2D, {
+        bodyType: BODY_DYNAMIC,
+        damping: 0.02  // 2% velocity reduction per frame
+    })
+    .register();
+```
+
+Damping formula: `velocity *= (1 - damping)` each frame.
+
+| Damping Value | Effect |
+|---------------|--------|
+| 0 | No damping (objects keep moving forever) |
+| 0.01-0.05 | Light drag (space games) |
+| 0.1-0.2 | Medium friction (top-down games) |
+| 0.5+ | Heavy resistance (underwater) |
 
 ## Common Patterns
 
