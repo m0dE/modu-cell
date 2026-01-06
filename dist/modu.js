@@ -4441,7 +4441,8 @@ var Game = class {
     if (this.gameLoop)
       return;
     let lastSnapshotFrame = 0;
-    const SNAPSHOT_INTERVAL = 10;
+    const isLocalhost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+    const SNAPSHOT_INTERVAL = isLocalhost ? 10 : 100;
     const loop = () => {
       if (this.renderer?.render) {
         this.renderer.render();
@@ -5414,7 +5415,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "4a34f06";
+var ENGINE_VERSION = "168fac2";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;

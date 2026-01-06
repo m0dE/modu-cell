@@ -1223,7 +1223,8 @@ export class Game {
         if (this.gameLoop)
             return;
         let lastSnapshotFrame = 0;
-        const SNAPSHOT_INTERVAL = 10; // Every 0.5 seconds at 20fps (for debugging)
+        const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+        const SNAPSHOT_INTERVAL = isLocalhost ? 10 : 100; // 0.5s locally, 5s in prod (at 20fps)
         const loop = () => {
             // Render
             if (this.renderer?.render) {
