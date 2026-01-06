@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-06T21:50:31.889Z - Commit: dd2d900 */
+/* Modu Engine - Built: 2026-01-06T21:54:21.112Z - Commit: 5f37381 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -6486,7 +6486,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "dd2d900";
+  var ENGINE_VERSION = "5f37381";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
@@ -6564,8 +6564,8 @@ var Modu = (() => {
       const upStr = formatBandwidth(up);
       const downStr = formatBandwidth(down);
       const driftStats = eng.getDriftStats?.() || { determinismPercent: 100, totalChecks: 0, matchingFieldCount: 0, totalFieldCount: 0 };
-      const detPct = driftStats.determinismPercent.toFixed(1);
-      const detColor = driftStats.determinismPercent >= 99.9 ? "#0f0" : driftStats.determinismPercent >= 95 ? "#ff0" : "#f00";
+      const detPct = (Math.floor(driftStats.determinismPercent * 10) / 10).toFixed(1);
+      const detColor = driftStats.determinismPercent === 100 ? "#0f0" : driftStats.determinismPercent >= 99 ? "#ff0" : "#f00";
       let syncStatus;
       if (isAuthority) {
         syncStatus = `<span style="color:#888">I'm authority</span>`;
