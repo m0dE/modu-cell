@@ -29,6 +29,15 @@ import {
 // Track merge eligibility
 export const cellMergeFrame = new Map<number, number>();
 
+// Simple hash function for deterministic spawn positions
+function hashString(str: string): number {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+    }
+    return hash >>> 0; // Convert to unsigned
+}
+
 // Track previous positions for actual speed measurement
 
 // Helper: Get client ID string for deterministic sorting
@@ -87,13 +96,19 @@ export function spawnFood(game: modu.Game): void {
 }
 
 export function spawnCell(game: modu.Game, clientId: string, options: SpawnCellOptions = {}): modu.Entity {
-    const colorStr = options.color || COLORS[(Math.random() * COLORS.length) | 0];
+    // Use hash-based positioning for determinism (random in callbacks desyncs RNG)
+    const hash = hashString(clientId);
+    const colorStr = options.color || COLORS[hash % COLORS.length];
     const color = game.internString('color', colorStr);
     const radius = options.radius || INITIAL_RADIUS;
 
+    // Derive spawn position from hash (different bits for x and y)
+    const spawnX = options.x ?? (100 + ((hash >>> 0) % (WORLD_WIDTH - 200)));
+    const spawnY = options.y ?? (100 + ((hash >>> 16 ^ hash) % (WORLD_HEIGHT - 200)));
+
     const entity = game.spawn('cell', {
-        x: options.x ?? (100 + (Math.random() * (WORLD_WIDTH - 200)) | 0),
-        y: options.y ?? (100 + (Math.random() * (WORLD_HEIGHT - 200)) | 0),
+        x: spawnX,
+        y: spawnY,
         clientId,
         color
     });
