@@ -81,8 +81,18 @@ export function initGame(): void {
     canvas = document.getElementById('game') as HTMLCanvasElement;
     minimapCanvas = document.getElementById('minimap') as HTMLCanvasElement;
     sizeDisplay = document.getElementById('size-display')!;
+    // Set canvas to fullscreen
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
     WIDTH = canvas.width;
     HEIGHT = canvas.height;
+    // Handle window resize
+    window.addEventListener('resize', () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        WIDTH = canvas.width;
+        HEIGHT = canvas.height;
+    });
 
     game = modu.createGame();
     renderer = game.addPlugin(modu.Simple2DRenderer, canvas);

@@ -1,43 +1,22 @@
 <!DOCTYPE html>
 <html>
-
 <head>
     <meta charset="UTF-8">
-    <title>Cell Eater</title>
+    <title>Cell Eater (Dev)</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            background: #111;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            overflow: hidden;
-        }
-
-        #game-container {
-            position: relative;
-        }
-
-        canvas {
-            border: 2px solid #333;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        #game-container { position: relative; }
+        canvas { border: 2px solid #333; }
         #minimap {
             position: fixed;
             bottom: 20px;
             right: 20px;
             border: 2px solid #555;
-            background: rgba(0, 0, 0, 0.7);
+            background: rgba(0,0,0,0.7);
             border-radius: 4px;
             z-index: 100;
         }
-
         #size-display {
             position: fixed;
             bottom: 20px;
@@ -46,12 +25,11 @@
             font-family: Arial, sans-serif;
             font-size: 24px;
             font-weight: bold;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
             z-index: 100;
         }
     </style>
 </head>
-
 <body>
     <div id="game-container">
         <canvas id="game" width="1400" height="900"></canvas>
@@ -59,12 +37,9 @@
         <div id="size-display">Size: 0</div>
     </div>
 
-    <!-- Modu Engine (cache-busted for dev) -->
-    <script>
-        document.write('<script src="http://localhost:3001/dist/modu.min.js?v=' + Date.now() + '"><\/script>');
-    </script>
+    <!-- Modu Engine (local dev server) -->
+    <script src="http://localhost:3001/dist/modu.min.js"></script>
     <!-- Game bundle (uses Modu global) -->
     <script src="game.js"></script>
 </body>
-
 </html>

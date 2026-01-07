@@ -184,7 +184,8 @@ export function setupSystems(game: modu.Game): void {
             const playerInput = game.world.getInput(clientId);
 
             // Debug: log every 60 frames
-            if (game.world.frame % 60 === 0) {
+            if (game.world.frame % 60 === 0 && cells.length > 0) {
+                console.log(`[MOVE] clientId=${clientId}, cells=${cells.length}, hasInput=${!!playerInput}, hasTarget=${!!playerInput?.target}`);
             }
 
             for (const cell of cells) {

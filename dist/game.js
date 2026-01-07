@@ -41,6 +41,7 @@ var CellEater = (() => {
   // src/game.ts
   var game_exports = {};
   __export(game_exports, {
+    cameraChaseEnabled: () => cameraChaseEnabled,
     initGame: () => initGame
   });
   var modu4 = __toESM(require_modu_engine());
@@ -100,13 +101,20 @@ var CellEater = (() => {
   function defineEntities(game2) {
     game2.defineEntity("cell").with(modu.Transform2D).with(modu.Sprite, { shape: modu.SHAPE_CIRCLE, radius: INITIAL_RADIUS, layer: 1 }).with(modu.Body2D, { shapeType: modu.SHAPE_CIRCLE, radius: INITIAL_RADIUS, bodyType: modu.BODY_KINEMATIC }).with(modu.Player).register();
     game2.defineEntity("food").with(modu.Transform2D).with(modu.Sprite, { shape: modu.SHAPE_CIRCLE, radius: 8, layer: 0 }).with(modu.Body2D, { shapeType: modu.SHAPE_CIRCLE, radius: 8, bodyType: modu.BODY_STATIC }).register();
-    game2.defineEntity("camera").with(modu.Camera2D, { smoothing: 0.15 }).syncNone().register();
+    game2.defineEntity("camera").with(modu.Camera2D, { smoothing: 0.25 }).syncNone().register();
   }
 
   // src/systems.ts
   var import_modu_engine = __toESM(require_modu_engine());
   var modu2 = __toESM(require_modu_engine());
   var cellMergeFrame = /* @__PURE__ */ new Map();
+  function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash << 5) - hash + str.charCodeAt(i) | 0;
+    }
+    return hash >>> 0;
+  }
   function getClientIdStr(game2, numericId) {
     return game2.getClientIdString(numericId) || "";
   }
@@ -156,12 +164,15 @@ var CellEater = (() => {
     });
   }
   function spawnCell(game2, clientId, options = {}) {
-    const colorStr = options.color || COLORS[(0, import_modu_engine.dRandom)() * COLORS.length | 0];
+    const hash = hashString(clientId);
+    const colorStr = options.color || COLORS[hash % COLORS.length];
     const color = game2.internString("color", colorStr);
     const radius = options.radius || INITIAL_RADIUS;
+    const spawnX = options.x ?? 100 + (hash >>> 0) % (WORLD_WIDTH - 200);
+    const spawnY = options.y ?? 100 + (hash >>> 16 ^ hash) % (WORLD_HEIGHT - 200);
     const entity = game2.spawn("cell", {
-      x: options.x ?? 100 + (0, import_modu_engine.dRandom)() * (WORLD_WIDTH - 200) | 0,
-      y: options.y ?? 100 + (0, import_modu_engine.dRandom)() * (WORLD_HEIGHT - 200) | 0,
+      x: spawnX,
+      y: spawnY,
       clientId,
       color
     });
@@ -220,8 +231,8 @@ var CellEater = (() => {
       }
       for (const [clientId, cells] of sortedPlayers) {
         const playerInput = game2.world.getInput(clientId);
-        if (game2.world.frame % 60 === 0) {
-          console.log(`[MOVE] clientId=${clientId} cells=${cells.length} hasInput=${!!playerInput} hasTarget=${!!playerInput?.target}`);
+        if (game2.world.frame % 60 === 0 && cells.length > 0) {
+          console.log(`[MOVE] clientId=${clientId}, cells=${cells.length}, hasInput=${!!playerInput}, hasTarget=${!!playerInput?.target}`);
         }
         for (const cell of cells) {
           const sprite = cell.get(modu2.Sprite);
@@ -245,10 +256,6 @@ var CellEater = (() => {
           if (rep) {
             vx += rep.vx;
             vy += rep.vy;
-          }
-          if (game2.world.frame % 30 === 0 && (vx !== 0 || vy !== 0)) {
-            const speed = (0, import_modu_engine.dSqrt)(vx * vx + vy * vy);
-            console.log(`[VEL] speed=${speed.toFixed(1)} vx=${vx.toFixed(1)} vy=${vy.toFixed(1)}`);
           }
           cell.setVelocity(vx, vy);
           const r = sprite.radius;
@@ -395,7 +402,7 @@ var CellEater = (() => {
       y: (worldY - camY) * camZoom + HEIGHT2 / 2
     };
   }
-  function updateCamera(game2, cameraEntity2, getLocalClientId2) {
+  function updateCamera(game2, cameraEntity2, getLocalClientId2, alpha) {
     const localId = getLocalClientId2();
     if (localId === null)
       return;
@@ -408,19 +415,21 @@ var CellEater = (() => {
     let centerX = 0;
     let centerY = 0;
     for (const cell of cells) {
-      const transform = cell.get(modu3.Transform2D);
+      cell.interpolate(alpha);
       const sprite = cell.get(modu3.Sprite);
       const area = sprite.radius * sprite.radius;
-      centerX += transform.x * area;
-      centerY += transform.y * area;
+      centerX += cell.render.interpX * area;
+      centerY += cell.render.interpY * area;
       totalArea += area;
       totalSize += sprite.radius;
     }
     if (totalArea > 0) {
       centerX /= totalArea;
       centerY /= totalArea;
-      camera.x += (centerX - camera.x) * camera.smoothing;
-      camera.y += (centerY - camera.y) * camera.smoothing;
+      if (cameraChaseEnabled) {
+        camera.x += (centerX - camera.x) * camera.smoothing;
+        camera.y += (centerY - camera.y) * camera.smoothing;
+      }
       camera.targetZoom = Math.max(MIN_ZOOM, BASE_ZOOM - (totalSize - INITIAL_RADIUS) * ZOOM_SCALE_FACTOR);
       camera.zoom += (camera.targetZoom - camera.zoom) * camera.smoothing;
     }
@@ -490,7 +499,7 @@ var CellEater = (() => {
       const cameraEntity2 = getCameraEntity();
       const alpha = game2.getRenderAlpha();
       const camera = cameraEntity2.get(modu3.Camera2D);
-      updateCamera(game2, cameraEntity2, getLocalClientId2);
+      updateCamera(game2, cameraEntity2, getLocalClientId2, alpha);
       const camX = camera.x;
       const camY = camera.y;
       ctx.fillStyle = "#f2f2f2";
@@ -601,6 +610,8 @@ var CellEater = (() => {
   var HEIGHT;
   var mouseX;
   var mouseY;
+  var cameraChaseEnabled = true;
+  var prevToggleCameraState = false;
   function getLocalClientId() {
     const clientId = game.localClientId;
     if (!clientId || typeof clientId !== "string")
@@ -628,13 +639,25 @@ var CellEater = (() => {
       type: "button",
       bindings: ["key: "]
     });
+    input.action("toggleCamera", {
+      type: "button",
+      bindings: ["key:c"]
+    });
   }
   function initGame() {
     canvas = document.getElementById("game");
     minimapCanvas = document.getElementById("minimap");
     sizeDisplay = document.getElementById("size-display");
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
     WIDTH = canvas.width;
     HEIGHT = canvas.height;
+    window.addEventListener("resize", () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      WIDTH = canvas.width;
+      HEIGHT = canvas.height;
+    });
     game = modu4.createGame();
     renderer = game.addPlugin(modu4.Simple2DRenderer, canvas);
     physics = game.addPlugin(modu4.Physics2DSystem, { gravity: { x: 0, y: 0 } });
@@ -660,6 +683,18 @@ var CellEater = (() => {
       return cameraEntity;
     }
     setupInput(ensureCameraEntity);
+    game.addSystem(() => {
+      const localId = getLocalClientId();
+      if (localId === null)
+        return;
+      const playerInput = game.world.getInput(localId);
+      const togglePressed = playerInput?.toggleCamera === true;
+      if (togglePressed && !prevToggleCameraState) {
+        cameraChaseEnabled = !cameraChaseEnabled;
+        console.log("[DEBUG] Camera chase:", cameraChaseEnabled ? "ON" : "OFF");
+      }
+      prevToggleCameraState = togglePressed;
+    }, { phase: "update" });
     renderer.render = createRenderer(
       game,
       renderer,
