@@ -275,11 +275,17 @@ var CellEater = (() => {
       const sortedPlayers = getSortedPlayers(game2, playerCells);
       for (const [clientId, cells] of sortedPlayers) {
         const playerInput = game2.world.getInput(clientId);
+        if (playerInput?.split) {
+          console.log(`[SPLIT SYSTEM] frame=${game2.world.frame} clientId=${clientId} split=true target=${JSON.stringify(playerInput?.target)} cells=${cells.length}`);
+        }
         if (!playerInput?.split || !playerInput?.target)
           continue;
-        if (cells.length >= MAX_CELLS_PER_PLAYER)
+        if (cells.length >= MAX_CELLS_PER_PLAYER) {
+          console.log(`[SPLIT] Skipping - max cells reached (${cells.length}/${MAX_CELLS_PER_PLAYER})`);
           continue;
+        }
         const cellsToSplit = cells.filter((c) => c.get(modu2.Sprite).radius >= MIN_SPLIT_RADIUS).slice(0, MAX_CELLS_PER_PLAYER - cells.length);
+        console.log(`[SPLIT] Cells eligible for split: ${cellsToSplit.length} of ${cells.length} (minRadius=${MIN_SPLIT_RADIUS})`);
         for (const cell of cellsToSplit) {
           const t = cell.get(modu2.Transform2D);
           const s = cell.get(modu2.Sprite);
@@ -636,6 +642,15 @@ var CellEater = (() => {
     input.action("split", {
       type: "button",
       bindings: ["key: "]
+      // Use string binding like toggleCamera
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === " ") {
+        console.log("[INPUT] Space keydown detected!");
+        console.log('[INPUT] isKeyDown(" ") result:', input.isKeyDown(" "));
+        console.log('[INPUT] input.get("split") result:', input.get("split"));
+        console.log("[INPUT] All actions:", input.getAll());
+      }
     });
     input.action("toggleCamera", {
       type: "button",

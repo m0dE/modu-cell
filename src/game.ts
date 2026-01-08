@@ -66,7 +66,17 @@ function setupInput(getCameraEntity: () => modu.Entity): void {
 
     input.action('split', {
         type: 'button',
-        bindings: ['key: ']
+        bindings: ['key: ']  // Use string binding like toggleCamera
+    });
+
+    // Debug: test if space is being tracked
+    window.addEventListener('keydown', (e) => {
+        if (e.key === ' ') {
+            console.log('[INPUT] Space keydown detected!');
+            console.log('[INPUT] isKeyDown(" ") result:', input.isKeyDown(' '));
+            console.log('[INPUT] input.get("split") result:', input.get('split'));
+            console.log('[INPUT] All actions:', input.getAll());
+        }
     });
 
     // Debug: toggle camera chase with C key

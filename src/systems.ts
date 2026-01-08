@@ -243,12 +243,22 @@ export function setupSystems(game: modu.Game): void {
         for (const [clientId, cells] of sortedPlayers) {
             const playerInput = game.world.getInput(clientId);
 
+            // Debug: log when split is true
+            if (playerInput?.split) {
+                console.log(`[SPLIT SYSTEM] frame=${game.world.frame} clientId=${clientId} split=true target=${JSON.stringify(playerInput?.target)} cells=${cells.length}`);
+            }
+
             if (!playerInput?.split || !playerInput?.target) continue;
-            if (cells.length >= MAX_CELLS_PER_PLAYER) continue;
+            if (cells.length >= MAX_CELLS_PER_PLAYER) {
+                console.log(`[SPLIT] Skipping - max cells reached (${cells.length}/${MAX_CELLS_PER_PLAYER})`);
+                continue;
+            }
 
             const cellsToSplit = cells
                 .filter(c => c.get(modu.Sprite).radius >= MIN_SPLIT_RADIUS)
                 .slice(0, MAX_CELLS_PER_PLAYER - cells.length);
+
+            console.log(`[SPLIT] Cells eligible for split: ${cellsToSplit.length} of ${cells.length} (minRadius=${MIN_SPLIT_RADIUS})`);
 
             for (const cell of cellsToSplit) {
                 const t = cell.get(modu.Transform2D);
