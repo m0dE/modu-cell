@@ -17,7 +17,7 @@ import { EntityPool } from './entity';
 import { INDEX_MASK } from './constants';
 import { toFixed, saveRandomState, loadRandomState } from '../math';
 import { StringRegistry } from './string-registry';
-import { InputHistory } from './input-history';
+import { xxhash32Combine } from '../hash/xxhash';
 /**
  * Entity definition builder.
  */
@@ -133,18 +133,10 @@ export class World {
         /** True while running deterministic simulation phases */
         this._isSimulating = false;
         // ==========================================
-        // Client-Side Prediction (Phase 4)
+        // State Synchronization
         // ==========================================
-        /** Local client ID for prediction */
+        /** Local client ID for this client */
         this.localClientId = null;
-        /** Pending predictions awaiting server confirmation */
-        this.predictions = [];
-        /** Rollback buffer for state restoration */
-        this.rollbackBuffer = new Map();
-        /** Maximum frames to keep in rollback buffer */
-        this.rollbackBufferSize = 60;
-        /** Input history for rollback resimulation */
-        this.inputHistory = new InputHistory(120);
         this.idAllocator = new EntityIdAllocator();
         this.entityPool = new EntityPool();
         this.strings = new StringRegistry();
@@ -907,165 +899,22 @@ export class World {
         }
     }
     /**
-     * Handle local player input (client-side prediction).
-     * Applies input immediately for responsiveness.
-     */
-    handleLocalInput(input) {
-        if (this.localClientId === null) {
-            console.warn('Cannot handle local input: localClientId not set');
-            return;
-        }
-        // Apply input immediately (prediction)
-        const entity = this.getEntityByClientId(this.localClientId);
-        if (entity) {
-            entity._setInputData(input);
-        }
-        // Store input in history for potential resimulation
-        this.inputHistory.setInput(this.frame, this.localClientId, input);
-        // Store prediction for verification
-        this.predictions.push({
-            frame: this.frame,
-            input,
-            hash: this.getStateHash()
-        });
-    }
-    /**
-     * Process server-confirmed inputs.
-     * Detects mispredictions and triggers rollback if needed.
-     */
-    onServerTick(serverFrame, inputs) {
-        // Save current state before processing
-        this.saveSnapshot(this.frame);
-        // Convert NetworkInput[] to Map for input history
-        const inputMap = new Map();
-        for (const input of inputs) {
-            inputMap.set(input.clientId, input.data);
-        }
-        // Store confirmed inputs in history for potential resimulation
-        this.inputHistory.confirmFrame(serverFrame, inputMap);
-        // Prune old input history to manage memory
-        const minFrame = serverFrame - 120;
-        if (minFrame > 0) {
-            this.inputHistory.prune(minFrame);
-        }
-        // Check if we predicted this frame
-        const predictionIdx = this.predictions.findIndex(p => p.frame === serverFrame);
-        if (predictionIdx !== -1) {
-            // We predicted this frame - verify our prediction was correct
-            const prediction = this.predictions[predictionIdx];
-            // Rollback to frame before this tick
-            const snapshot = this.rollbackBuffer.get(serverFrame);
-            if (snapshot) {
-                this.loadSparseSnapshot(snapshot);
-            }
-            // Apply server inputs
-            this.tick(serverFrame, inputs);
-            // Check if state matches our prediction
-            const serverHash = this.getStateHash();
-            const mispredicted = serverHash !== prediction.hash;
-            if (mispredicted) {
-                // Notify about rollback
-                this.onRollback?.(serverFrame);
-                // Resimulate from this frame forward
-                this.resimulateFrom(serverFrame);
-            }
-            // Remove verified predictions up to this frame
-            this.predictions = this.predictions.filter(p => p.frame > serverFrame);
-            return mispredicted;
-        }
-        else {
-            // We didn't predict this frame, just apply normally
-            this.tick(serverFrame, inputs);
-            return false;
-        }
-    }
-    /**
-     * Save snapshot for potential rollback.
-     */
-    saveSnapshot(frame) {
-        const snapshot = this.getSparseSnapshot();
-        this.rollbackBuffer.set(frame, snapshot);
-        // Prune old snapshots
-        const minFrame = frame - this.rollbackBufferSize + 1;
-        for (const f of this.rollbackBuffer.keys()) {
-            if (f < minFrame) {
-                this.rollbackBuffer.delete(f);
-            }
-        }
-    }
-    /**
-     * Restore state from snapshot at frame.
-     */
-    restoreSnapshot(frame) {
-        const snapshot = this.rollbackBuffer.get(frame);
-        if (!snapshot) {
-            return false;
-        }
-        this.loadSparseSnapshot(snapshot);
-        return true;
-    }
-    /**
-     * Check if snapshot exists for frame.
-     */
-    hasSnapshot(frame) {
-        return this.rollbackBuffer.has(frame);
-    }
-    /**
-     * Get oldest frame in rollback buffer.
-     */
-    getOldestSnapshotFrame() {
-        let oldest;
-        for (const frame of this.rollbackBuffer.keys()) {
-            if (oldest === undefined || frame < oldest) {
-                oldest = frame;
-            }
-        }
-        return oldest;
-    }
-    /**
-     * Resimulate from a frame forward to current frame.
-     * Uses stored inputs from input history.
-     *
-     * NOTE: This retrieves data from InputHistory but full tick logic
-     * will be implemented in Phase 2 of the rollback implementation plan.
-     */
-    resimulateFrom(fromFrame) {
-        const currentFrame = this.frame;
-        // Get all frames we need to resimulate (fromFrame+1 to current)
-        // We already applied fromFrame, so start at next frame
-        const framesToResim = this.inputHistory.getRange(fromFrame + 1, currentFrame);
-        // TODO Phase 2: Actually resimulate each frame
-        // For now, just log that we have the data available
-        if (framesToResim.length > 0) {
-            // Frames are available for resimulation
-            // Full implementation will call this.tick() for each frame
-            for (const frameInput of framesToResim) {
-                // Convert FrameInput to NetworkInput[] format
-                const inputs = [];
-                for (const [clientId, data] of frameInput.getSortedInputs()) {
-                    inputs.push({ clientId, data });
-                }
-                // Tick the world with these inputs
-                this.tick(frameInput.frame, inputs);
-            }
-        }
-        // Restore frame counter (tick may have incremented it)
-        this.frame = currentFrame;
-    }
-    /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Returns 4-byte unsigned integer (xxhash32).
      * Excludes components with sync: false (client-only state).
      */
     getStateHash() {
         // Get all entity data in deterministic order
         const sortedEids = Array.from(this.activeEntities).sort((a, b) => a - b);
         let hash = 0;
+        // Hash entity count first
+        hash = xxhash32Combine(hash, sortedEids.length);
         for (const eid of sortedEids) {
             const index = eid & INDEX_MASK;
             const components = this.entityComponents.get(eid) || [];
             // Hash eid
-            hash = (hash * 31 + eid) | 0;
+            hash = xxhash32Combine(hash, eid >>> 0);
             // Hash each component's fields in deterministic order
             for (const component of components) {
                 // Skip components that are not synced (client-only state)
@@ -1075,30 +924,17 @@ export class World {
                 for (const fieldName of fieldNames) {
                     const arr = component.storage.fields[fieldName];
                     const value = arr[index];
-                    hash = (hash * 31 + value) | 0;
+                    hash = xxhash32Combine(hash, value >>> 0);
                 }
             }
         }
-        // Convert to hex string
-        return (hash >>> 0).toString(16).padStart(8, '0');
+        return hash >>> 0;
     }
     /**
-     * Clear rollback buffer.
+     * Get deterministic hash as hex string (for debugging).
+     * @deprecated Use getStateHash() which returns a number.
      */
-    clearRollbackBuffer() {
-        this.rollbackBuffer.clear();
-        this.predictions = [];
-    }
-    /**
-     * Get pending prediction count.
-     */
-    getPendingPredictionCount() {
-        return this.predictions.length;
-    }
-    /**
-     * Check if we have pending predictions.
-     */
-    hasPendingPredictions() {
-        return this.predictions.length > 0;
+    getStateHashHex() {
+        return this.getStateHash().toString(16).padStart(8, '0');
     }
 }

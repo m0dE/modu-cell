@@ -292,70 +292,20 @@ export declare class World {
      * Save previous positions for interpolation (called in prePhysics).
      */
     saveInterpolationState(): void;
-    /** Local client ID for prediction */
+    /** Local client ID for this client */
     localClientId: number | null;
-    /** Pending predictions awaiting server confirmation */
-    private predictions;
-    /** Rollback buffer for state restoration */
-    private rollbackBuffer;
-    /** Maximum frames to keep in rollback buffer */
-    rollbackBufferSize: number;
-    /** Callback for when rollback occurs */
-    onRollback?: (toFrame: number) => void;
-    /** Input history for rollback resimulation */
-    private inputHistory;
-    /**
-     * Handle local player input (client-side prediction).
-     * Applies input immediately for responsiveness.
-     */
-    handleLocalInput(input: Record<string, any>): void;
-    /**
-     * Process server-confirmed inputs.
-     * Detects mispredictions and triggers rollback if needed.
-     */
-    onServerTick(serverFrame: number, inputs: NetworkInput[]): boolean;
-    /**
-     * Save snapshot for potential rollback.
-     */
-    saveSnapshot(frame: number): void;
-    /**
-     * Restore state from snapshot at frame.
-     */
-    restoreSnapshot(frame: number): boolean;
-    /**
-     * Check if snapshot exists for frame.
-     */
-    hasSnapshot(frame: number): boolean;
-    /**
-     * Get oldest frame in rollback buffer.
-     */
-    getOldestSnapshotFrame(): number | undefined;
-    /**
-     * Resimulate from a frame forward to current frame.
-     * Uses stored inputs from input history.
-     *
-     * NOTE: This retrieves data from InputHistory but full tick logic
-     * will be implemented in Phase 2 of the rollback implementation plan.
-     */
-    private resimulateFrom;
     /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Returns 4-byte unsigned integer (xxhash32).
      * Excludes components with sync: false (client-only state).
      */
-    getStateHash(): string;
+    getStateHash(): number;
     /**
-     * Clear rollback buffer.
+     * Get deterministic hash as hex string (for debugging).
+     * @deprecated Use getStateHash() which returns a number.
      */
-    clearRollbackBuffer(): void;
-    /**
-     * Get pending prediction count.
-     */
-    getPendingPredictionCount(): number;
-    /**
-     * Check if we have pending predictions.
-     */
-    hasPendingPredictions(): boolean;
+    getStateHashHex(): string;
 }
 /**
  * Network input format.
@@ -363,14 +313,6 @@ export declare class World {
 export interface NetworkInput {
     clientId: number;
     data: Record<string, any>;
-}
-/**
- * Prediction entry for tracking local predictions.
- */
-export interface PredictionEntry {
-    frame: number;
-    input: Record<string, any>;
-    hash: string;
 }
 /**
  * World state for snapshotting.

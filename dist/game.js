@@ -7,13 +7,14 @@
  * - game.query(type) → Iterator
  * - game.addSystem(fn, options)
  * - game.physics → Physics2D integration
- * - game.connect() → Network connection with rollback sync
+ * - game.connect() → Network connection with distributed state sync
  */
 import { World } from './core/world';
 import { Player } from './components';
 import { encode, decode } from './codec';
 import { loadRandomState, saveRandomState } from './math/random';
 import { INDEX_MASK } from './core/constants';
+import { computePartitionAssignment, getClientPartitions, computeStateDelta, getPartition, computePartitionCount } from './sync';
 // Debug flag - set to false for production
 const DEBUG_NETWORK = false;
 // ==========================================
@@ -96,6 +97,32 @@ export class Game {
         /** Tick timing for render interpolation */
         this.lastTickTime = 0;
         this.tickIntervalMs = 50; // 20fps default
+        // ==========================================
+        // State Sync
+        // ==========================================
+        /** Current reliability scores from server (clientId -> score) */
+        this.reliabilityScores = {};
+        /** Reliability scores version (for change detection) */
+        this.reliabilityVersion = 0;
+        /** Active client list (sorted, for deterministic partition assignment) */
+        this.activeClients = [];
+        /** Previous snapshot for delta computation */
+        this.prevSnapshot = null;
+        /** State sync enabled flag */
+        this.stateSyncEnabled = true;
+        /** Delta bandwidth tracking */
+        this.deltaBytesThisSecond = 0;
+        this.deltaBytesPerSecond = 0;
+        this.deltaBytesSampleTime = 0;
+        /** Desync tracking for hash-based sync */
+        this.isDesynced = false;
+        this.desyncFrame = 0;
+        this.desyncLocalHash = 0;
+        this.desyncMajorityHash = 0;
+        this.resyncPending = false;
+        /** Hash comparison stats (rolling window) */
+        this.hashChecksPassed = 0;
+        this.hashChecksFailed = 0;
         // ==========================================
         // String Interning
         // ==========================================
@@ -313,9 +340,17 @@ export class Game {
     // ==========================================
     /**
      * Get deterministic state hash.
+     * Returns 4-byte unsigned integer (xxhash32).
      */
     getStateHash() {
         return this.world.getStateHash();
+    }
+    /**
+     * Get deterministic state hash as hex string (for debugging).
+     * @deprecated Use getStateHash() which returns a number.
+     */
+    getStateHashHex() {
+        return this.world.getStateHashHex();
     }
     /**
      * Reset game state.
@@ -370,12 +405,285 @@ export class Game {
                 }
             });
             this.localClientIdStr = this.connection.clientId;
+            // Set up state sync callbacks
+            if (this.connection.onReliabilityUpdate !== undefined) {
+                this.connection.onReliabilityUpdate = (scores, version) => {
+                    this.handleReliabilityUpdate(scores, version);
+                };
+            }
+            if (this.connection.onMajorityHash !== undefined) {
+                this.connection.onMajorityHash = (frame, hash) => {
+                    this.handleMajorityHash(frame, hash);
+                };
+            }
+            if (this.connection.onResyncSnapshot !== undefined) {
+                this.connection.onResyncSnapshot = (data, frame) => {
+                    this.handleResyncSnapshot(data, frame);
+                };
+            }
         }
         catch (err) {
             console.warn('[ecs] Connection failed:', err?.message || err);
             this.connection = null;
             this.connectedRoomId = null;
         }
+    }
+    /**
+     * Handle reliability score update from server.
+     */
+    handleReliabilityUpdate(scores, version) {
+        if (version <= this.reliabilityVersion) {
+            return; // Already have this or newer
+        }
+        this.reliabilityScores = scores;
+        this.reliabilityVersion = version;
+    }
+    /**
+     * Handle majority hash from server (for desync detection).
+     */
+    handleMajorityHash(frame, majorityHash) {
+        // Compare our hash with majority to detect desync
+        const localHash = this.world.getStateHash();
+        if (localHash === majorityHash) {
+            // Hash matches - track successful check
+            this.hashChecksPassed++;
+            // If we were desynced but now match, we've recovered
+            if (this.isDesynced && !this.resyncPending) {
+                console.log(`[state-sync] Recovered from desync at frame ${frame}`);
+                this.isDesynced = false;
+            }
+        }
+        else {
+            // Hash mismatch - desync detected
+            this.hashChecksFailed++;
+            // Only request resync if not already pending
+            if (!this.resyncPending) {
+                this.isDesynced = true;
+                this.desyncFrame = frame;
+                this.desyncLocalHash = localHash;
+                this.desyncMajorityHash = majorityHash;
+                console.error(`[state-sync] DESYNC DETECTED at frame ${frame}`);
+                console.error(`  Local hash:    ${localHash.toString(16).padStart(8, '0')}`);
+                console.error(`  Majority hash: ${majorityHash.toString(16).padStart(8, '0')}`);
+                console.error(`  Requesting resync from authority...`);
+                // Request full state from authority for recovery
+                if (this.connection?.requestResync) {
+                    this.resyncPending = true;
+                    this.connection.requestResync();
+                }
+                else {
+                    console.warn(`[state-sync] Cannot request resync - SDK does not support requestResync()`);
+                }
+            }
+        }
+    }
+    /**
+     * Handle resync snapshot from authority (hard recovery after desync).
+     * This compares state, logs detailed diff, then replaces local state.
+     */
+    handleResyncSnapshot(data, serverFrame) {
+        console.log(`[state-sync] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}`);
+        // Decode the snapshot
+        let snapshot;
+        try {
+            const decoded = decode(data);
+            snapshot = decoded?.snapshot;
+            if (!snapshot) {
+                console.error(`[state-sync] Failed to decode resync snapshot - no snapshot data`);
+                this.resyncPending = false;
+                return;
+            }
+        }
+        catch (e) {
+            console.error(`[state-sync] Failed to decode resync snapshot:`, e);
+            this.resyncPending = false;
+            return;
+        }
+        // Log detailed comparison BEFORE replacing state
+        console.error(`[state-sync] === DESYNC DIAGNOSIS ===`);
+        console.error(`  Desync detected at frame: ${this.desyncFrame}`);
+        console.error(`  Resync snapshot frame: ${serverFrame}`);
+        console.error(`  Local hash at desync:    ${this.desyncLocalHash.toString(16).padStart(8, '0')}`);
+        console.error(`  Majority hash at desync: ${this.desyncMajorityHash.toString(16).padStart(8, '0')}`);
+        // Run field-by-field comparison to get detailed diff
+        // This uses the same logic as compareSnapshotFields but logs immediately
+        this.logDesyncDiff(snapshot, serverFrame);
+        // Now perform hard recovery - replace local state with authority state
+        console.log(`[state-sync] Performing hard recovery...`);
+        // Store the current frame before resync
+        const preResyncFrame = this.currentFrame;
+        // Load the authority snapshot (this resets and rebuilds world state)
+        this.loadNetworkSnapshot(snapshot);
+        // Update frame to match server
+        this.currentFrame = serverFrame;
+        // Clear the desync state
+        this.resyncPending = false;
+        this.isDesynced = false;
+        // Verify resync worked
+        const newLocalHash = this.world.getStateHash();
+        const serverHash = snapshot.hash;
+        if (newLocalHash === serverHash) {
+            console.log(`[state-sync] Hard recovery successful - hashes now match`);
+            console.log(`  New local hash: ${newLocalHash.toString(16).padStart(8, '0')}`);
+        }
+        else {
+            console.error(`[state-sync] Hard recovery may have issues - hash mismatch after resync!`);
+            console.error(`  Expected: ${serverHash?.toString(16).padStart(8, '0')}`);
+            console.error(`  Got:      ${newLocalHash.toString(16).padStart(8, '0')}`);
+        }
+        // Store as last good snapshot
+        this.lastGoodSnapshot = {
+            snapshot: JSON.parse(JSON.stringify(snapshot)),
+            frame: serverFrame,
+            hash: newLocalHash
+        };
+        console.log(`[state-sync] === END RESYNC ===`);
+    }
+    /**
+     * Log detailed diff between local state and authority snapshot.
+     * Called during resync to help diagnose what went wrong.
+     */
+    logDesyncDiff(serverSnapshot, serverFrame) {
+        const lines = [];
+        const diffs = [];
+        const types = serverSnapshot.types || [];
+        const serverEntities = serverSnapshot.entities || [];
+        const schema = serverSnapshot.schema || [];
+        // Build map of server entities by eid
+        const serverEntityMap = new Map();
+        for (const e of serverEntities) {
+            serverEntityMap.set(e[0], e);
+        }
+        let matchingFields = 0;
+        let totalFields = 0;
+        // Compare each local entity with server entity
+        for (const entity of this.world.getAllEntities()) {
+            const eid = entity.eid;
+            const serverEntity = serverEntityMap.get(eid);
+            const index = eid & INDEX_MASK;
+            if (!serverEntity) {
+                // Entity exists locally but not on server
+                for (const comp of entity.getComponents()) {
+                    totalFields += comp.fieldNames.length;
+                    for (const fieldName of comp.fieldNames) {
+                        diffs.push({
+                            entity: entity.type,
+                            eid,
+                            comp: comp.name,
+                            field: fieldName,
+                            local: 'EXISTS',
+                            server: 'MISSING'
+                        });
+                    }
+                }
+                continue;
+            }
+            const [, typeIndex, serverValues] = serverEntity;
+            const typeSchema = schema[typeIndex];
+            if (!typeSchema)
+                continue;
+            let valueIdx = 0;
+            for (const [compName, fieldNames] of typeSchema) {
+                const localComp = entity.getComponents().find(c => c.name === compName);
+                for (const fieldName of fieldNames) {
+                    totalFields++;
+                    const serverValue = serverValues[valueIdx++];
+                    if (localComp) {
+                        const localValue = localComp.storage.fields[fieldName][index];
+                        const fieldDef = localComp.schema[fieldName];
+                        let valuesMatch = false;
+                        if (fieldDef?.type === 'bool') {
+                            const localBool = localValue !== 0;
+                            const serverBool = serverValue !== 0 && serverValue !== false;
+                            valuesMatch = localBool === serverBool;
+                        }
+                        else {
+                            valuesMatch = localValue === serverValue;
+                        }
+                        if (valuesMatch) {
+                            matchingFields++;
+                        }
+                        else {
+                            diffs.push({
+                                entity: entity.type,
+                                eid,
+                                comp: compName,
+                                field: fieldName,
+                                local: localValue,
+                                server: serverValue
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // Check for server entities not in local state
+        for (const [eid, serverEntity] of serverEntityMap) {
+            if (this.world.getEntity(eid) === null) {
+                const [, typeIndex, serverValues] = serverEntity;
+                const serverType = types[typeIndex] || `type${typeIndex}`;
+                totalFields += serverValues.length;
+                diffs.push({
+                    entity: serverType,
+                    eid,
+                    comp: '*',
+                    field: '*',
+                    local: 'MISSING',
+                    server: 'EXISTS'
+                });
+            }
+        }
+        // Build readable output
+        const syncPercent = totalFields > 0 ? (matchingFields / totalFields) * 100 : 100;
+        lines.push(`DIVERGENT FIELDS: ${diffs.length} differences found`);
+        lines.push(`  Sync: ${syncPercent.toFixed(1)}% (${matchingFields}/${totalFields} fields match)`);
+        lines.push(``);
+        // Try to find entity owners
+        const entityOwners = new Map();
+        for (const entity of this.world.getAllEntities()) {
+            if (entity.has(Player)) {
+                const playerData = entity.get(Player);
+                const ownerClientId = this.numToClientId.get(playerData.clientId);
+                if (ownerClientId) {
+                    entityOwners.set(entity.eid, ownerClientId.slice(0, 8));
+                }
+            }
+        }
+        // Group diffs by entity for readability
+        const diffsByEntity = new Map();
+        for (const d of diffs) {
+            if (!diffsByEntity.has(d.eid)) {
+                diffsByEntity.set(d.eid, []);
+            }
+            diffsByEntity.get(d.eid).push(d);
+        }
+        for (const [eid, entityDiffs] of diffsByEntity) {
+            const first = entityDiffs[0];
+            const owner = entityOwners.get(eid);
+            const ownerStr = owner ? ` [owner: ${owner}]` : '';
+            lines.push(`  ${first.entity}#${eid.toString(16)}${ownerStr}:`);
+            for (const d of entityDiffs) {
+                const delta = typeof d.local === 'number' && typeof d.server === 'number'
+                    ? ` (Δ ${(d.local - d.server).toFixed(4)})`
+                    : '';
+                lines.push(`    ${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
+            }
+        }
+        if (diffs.length === 0) {
+            lines.push(`  No field differences found (hash mismatch may be due to RNG or string state)`);
+        }
+        // Log recent inputs that may have caused the divergence
+        const recentInputCount = Math.min(this.recentInputs.length, 20);
+        if (recentInputCount > 0) {
+            lines.push(``);
+            lines.push(`RECENT INPUTS (last ${recentInputCount}):`);
+            const recent = this.recentInputs.slice(-recentInputCount);
+            for (const input of recent) {
+                const shortId = input.clientId.slice(0, 8);
+                lines.push(`  f${input.frame} [${shortId}]: ${JSON.stringify(input.data)}`);
+            }
+        }
+        console.error(lines.join('\n'));
     }
     /**
      * Handle initial connection (first join or late join).
@@ -406,8 +714,8 @@ export class Game {
         // Store snapshot hash for debug UI
         if (snapshot?.hash !== undefined) {
             this.lastSnapshotHash = typeof snapshot.hash === 'number'
-                ? snapshot.hash.toString(16).padStart(8, '0')
-                : String(snapshot.hash);
+                ? snapshot.hash
+                : parseInt(String(snapshot.hash), 16) || 0;
             this.lastSnapshotFrame = snapshot.frame || frame;
             this.lastSnapshotSize = snapshotSize;
             this.lastSnapshotEntityCount = snapshot.entities?.length || 0;
@@ -521,6 +829,51 @@ export class Game {
         }
         // 5. Record tick time for interpolation
         this.lastTickTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        // 6. Send state sync data (stateHash + partition data if assigned)
+        this.sendStateSync(frame);
+    }
+    /**
+     * Send state synchronization data after tick.
+     * Sends stateHash to server, and partition data if this client is assigned.
+     */
+    sendStateSync(frame) {
+        if (!this.stateSyncEnabled || !this.connection?.sendStateHash) {
+            return;
+        }
+        // Update delta bandwidth sampling (every second)
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (now - this.deltaBytesSampleTime >= 1000) {
+            this.deltaBytesPerSecond = this.deltaBytesThisSecond;
+            this.deltaBytesThisSecond = 0;
+            this.deltaBytesSampleTime = now;
+        }
+        // Compute and send state hash (9 bytes: 1 type + 4 frame + 4 hash)
+        const stateHash = this.world.getStateHash();
+        this.connection.sendStateHash(frame, stateHash);
+        this.deltaBytesThisSecond += 9;
+        // Check if this client is assigned to send partition data
+        if (this.activeClients.length > 0 && this.connection.clientId) {
+            const entityCount = this.world.entityCount;
+            const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+            // Compute partition assignment
+            const assignment = computePartitionAssignment(entityCount, this.activeClients, frame, this.reliabilityScores);
+            // Get partitions this client should send
+            const myPartitions = getClientPartitions(assignment, this.connection.clientId);
+            if (myPartitions.length > 0 && this.connection.sendPartitionData) {
+                // Compute delta from previous snapshot
+                const currentSnapshot = this.world.getSparseSnapshot();
+                const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+                // Send each assigned partition
+                for (const partitionId of myPartitions) {
+                    const partitionData = getPartition(delta, partitionId, numPartitions);
+                    this.connection.sendPartitionData(frame, partitionId, partitionData);
+                    // Track bytes: 1 type + 4 frame + 1 partitionId + 2 len + data
+                    this.deltaBytesThisSecond += 8 + partitionData.length;
+                }
+                // Store current snapshot as previous for next frame
+                this.prevSnapshot = currentSnapshot;
+            }
+        }
     }
     /**
      * Process a network input (join/leave/game).
@@ -558,6 +911,11 @@ export class Game {
             if (!this.connectedClients.includes(clientId)) {
                 this.connectedClients.push(clientId);
             }
+            // Update activeClients for state sync (sorted for deterministic assignment)
+            if (!this.activeClients.includes(clientId)) {
+                this.activeClients.push(clientId);
+                this.activeClients.sort();
+            }
             // First joiner becomes authority
             if (this.authorityClientId === null) {
                 this.authorityClientId = clientId;
@@ -593,6 +951,11 @@ export class Game {
             const idx = this.connectedClients.indexOf(clientId);
             if (idx !== -1) {
                 this.connectedClients.splice(idx, 1);
+            }
+            // Remove from activeClients for state sync
+            const activeIdx = this.activeClients.indexOf(clientId);
+            if (activeIdx !== -1) {
+                this.activeClients.splice(activeIdx, 1);
             }
             // Transfer authority if needed
             if (clientId === this.authorityClientId) {
@@ -1002,7 +1365,10 @@ export class Game {
             const serverSnapshot = decoded?.snapshot;
             const serverHash = decoded?.hash;
             if (serverSnapshot) {
-                this.lastSnapshotHash = serverHash;
+                // Ensure hash is stored as number
+                this.lastSnapshotHash = typeof serverHash === 'number'
+                    ? serverHash
+                    : (serverHash ? parseInt(String(serverHash), 16) : null) || null;
                 this.lastSnapshotFrame = serverSnapshot.frame;
                 this.lastSnapshotSize = data.length;
                 this.lastSnapshotEntityCount = serverSnapshot.entities?.length || 0;
@@ -1241,9 +1607,6 @@ export class Game {
     startGameLoop() {
         if (this.gameLoop)
             return;
-        let lastSnapshotFrame = 0;
-        const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-        const SNAPSHOT_INTERVAL = isLocalhost ? 10 : 100; // 0.5s locally, 5s in prod (at 20fps)
         const loop = () => {
             // Render
             if (this.renderer?.render) {
@@ -1252,11 +1615,8 @@ export class Game {
             else if (this.callbacks.render) {
                 this.callbacks.render();
             }
-            // Periodic snapshot upload (authority only)
-            if (this.checkIsAuthority() && this.currentFrame - lastSnapshotFrame >= SNAPSHOT_INTERVAL) {
-                this.sendSnapshot('loop');
-                lastSnapshotFrame = this.currentFrame;
-            }
+            // Note: With distributed state sync, we no longer send periodic snapshots.
+            // Snapshots are only sent on-demand for late joiners (server requests from any reliable client).
             this.gameLoop = requestAnimationFrame(loop);
         };
         this.gameLoop = requestAnimationFrame(loop);
@@ -1434,6 +1794,21 @@ export class Game {
         return { ...this.driftStats };
     }
     /**
+     * Get hash-based sync stats (for debug UI).
+     * Returns the rolling percentage of hash checks that passed.
+     */
+    getSyncStats() {
+        const total = this.hashChecksPassed + this.hashChecksFailed;
+        const syncPercent = total > 0 ? (this.hashChecksPassed / total) * 100 : 100;
+        return {
+            syncPercent,
+            passed: this.hashChecksPassed,
+            failed: this.hashChecksFailed,
+            isDesynced: this.isDesynced,
+            resyncPending: this.resyncPending
+        };
+    }
+    /**
      * Attach a renderer.
      */
     setRenderer(renderer) {
@@ -1444,6 +1819,30 @@ export class Game {
      */
     getCanvas() {
         return this.renderer?.element ?? null;
+    }
+    /**
+     * Get reliability scores (for debug UI).
+     */
+    getReliabilityScores() {
+        return { ...this.reliabilityScores };
+    }
+    /**
+     * Get active clients list (for debug UI).
+     */
+    getActiveClients() {
+        return [...this.activeClients];
+    }
+    /**
+     * Get local world entity count (for debug UI).
+     */
+    getEntityCount() {
+        return this.world.entityCount;
+    }
+    /**
+     * Get state sync delta bandwidth in bytes/second (for debug UI).
+     */
+    getDeltaBandwidth() {
+        return this.deltaBytesPerSecond;
     }
 }
 // ==========================================

@@ -10,7 +10,9 @@
     "build": "tsc",
     "build:browser": "node build-browser.js",
     "dev": "node build.js --watch --serve",
-    "watch": "node build.js --watch"
+    "watch": "node build.js --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "physics",
@@ -25,7 +27,8 @@
     "@types/node": "^25.0.3",
     "esbuild": "^0.20.0",
     "http-server": "^14.1.1",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.16"
   },
   "dependencies": {
     "mesh-network": "file:.."

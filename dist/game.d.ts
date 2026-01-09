@@ -7,7 +7,7 @@
  * - game.query(type) → Iterator
  * - game.addSystem(fn, options)
  * - game.physics → Physics2D integration
- * - game.connect() → Network connection with rollback sync
+ * - game.connect() → Network connection with distributed state sync
  */
 import { World, EntityBuilder } from './core/world';
 import { Entity } from './core/entity';
@@ -111,6 +111,29 @@ export declare class Game {
     /** Tick timing for render interpolation */
     private lastTickTime;
     private tickIntervalMs;
+    /** Current reliability scores from server (clientId -> score) */
+    private reliabilityScores;
+    /** Reliability scores version (for change detection) */
+    private reliabilityVersion;
+    /** Active client list (sorted, for deterministic partition assignment) */
+    private activeClients;
+    /** Previous snapshot for delta computation */
+    private prevSnapshot;
+    /** State sync enabled flag */
+    private stateSyncEnabled;
+    /** Delta bandwidth tracking */
+    private deltaBytesThisSecond;
+    private deltaBytesPerSecond;
+    private deltaBytesSampleTime;
+    /** Desync tracking for hash-based sync */
+    private isDesynced;
+    private desyncFrame;
+    private desyncLocalHash;
+    private desyncMajorityHash;
+    private resyncPending;
+    /** Hash comparison stats (rolling window) */
+    private hashChecksPassed;
+    private hashChecksFailed;
     /** String to ID mapping for clientIds */
     private clientIdToNum;
     private numToClientId;
@@ -234,8 +257,14 @@ export declare class Game {
     getString(namespace: string, id: number): string | null;
     /**
      * Get deterministic state hash.
+     * Returns 4-byte unsigned integer (xxhash32).
      */
-    getStateHash(): string;
+    getStateHash(): number;
+    /**
+     * Get deterministic state hash as hex string (for debugging).
+     * @deprecated Use getStateHash() which returns a number.
+     */
+    getStateHashHex(): string;
     /**
      * Reset game state.
      */
@@ -245,6 +274,24 @@ export declare class Game {
      */
     connect(roomId: string, callbacks: GameCallbacks, options?: ConnectOptions): Promise<void>;
     /**
+     * Handle reliability score update from server.
+     */
+    private handleReliabilityUpdate;
+    /**
+     * Handle majority hash from server (for desync detection).
+     */
+    private handleMajorityHash;
+    /**
+     * Handle resync snapshot from authority (hard recovery after desync).
+     * This compares state, logs detailed diff, then replaces local state.
+     */
+    private handleResyncSnapshot;
+    /**
+     * Log detailed diff between local state and authority snapshot.
+     * Called during resync to help diagnose what went wrong.
+     */
+    private logDesyncDiff;
+    /**
      * Handle initial connection (first join or late join).
      */
     private handleConnect;
@@ -252,6 +299,11 @@ export declare class Game {
      * Handle server tick.
      */
     private handleTick;
+    /**
+     * Send state synchronization data after tick.
+     * Sends stateHash to server, and partition data if this client is assigned.
+     */
+    private sendStateSync;
     /**
      * Process a network input (join/leave/game).
      */
@@ -357,7 +409,7 @@ export declare class Game {
      * Get last snapshot info.
      */
     getLastSnapshot(): {
-        hash: string | null;
+        hash: number | null;
         frame: number;
         size: number;
         entityCount: number;
@@ -393,6 +445,17 @@ export declare class Game {
         totalFieldCount: number;
     };
     /**
+     * Get hash-based sync stats (for debug UI).
+     * Returns the rolling percentage of hash checks that passed.
+     */
+    getSyncStats(): {
+        syncPercent: number;
+        passed: number;
+        failed: number;
+        isDesynced: boolean;
+        resyncPending: boolean;
+    };
+    /**
      * Attach a renderer.
      */
     setRenderer(renderer: any): void;
@@ -400,6 +463,22 @@ export declare class Game {
      * Get canvas from attached renderer.
      */
     getCanvas(): HTMLCanvasElement | null;
+    /**
+     * Get reliability scores (for debug UI).
+     */
+    getReliabilityScores(): Record<string, number>;
+    /**
+     * Get active clients list (for debug UI).
+     */
+    getActiveClients(): string[];
+    /**
+     * Get local world entity count (for debug UI).
+     */
+    getEntityCount(): number;
+    /**
+     * Get state sync delta bandwidth in bytes/second (for debug UI).
+     */
+    getDeltaBandwidth(): number;
 }
 /**
  * Game-specific entity builder with fluent API.

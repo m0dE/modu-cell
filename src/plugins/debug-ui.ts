@@ -17,15 +17,20 @@ export interface DebugUITarget {
     getClientId(): string | null;
     getFrame(): number;
     getNodeUrl(): string | null;
-    getLastSnapshot(): { hash: string | null; frame: number; size: number; entityCount: number };
+    getLastSnapshot(): { hash: number | null; frame: number; size: number; entityCount: number };
     getServerFps(): number;
     getRoomId(): string | null;
     getUploadRate(): number;
     getDownloadRate(): number;
     getClients(): string[];
-    getStateHash(): string;
-    isAuthority?(): boolean;
+    getStateHash(): number;
+    getEntityCount?(): number;
     getDriftStats?(): { determinismPercent: number; totalChecks: number; matchingFieldCount: number; totalFieldCount: number };
+    // State sync info
+    getReliabilityScores?(): Record<string, number>;
+    getActiveClients?(): string[];
+    getDeltaBandwidth?(): number;
+    getSyncStats?(): { syncPercent: number; passed: number; failed: number; isDesynced: boolean; resyncPending: boolean };
 }
 
 export interface DebugUIOptions {
@@ -116,7 +121,6 @@ export function enableDebugUI(target?: DebugUITarget, options: DebugUIOptions = 
         const up = eng.getUploadRate();
         const down = eng.getDownloadRate();
         const clients = eng.getClients();
-        const isAuthority = (eng as any).isAuthority?.() || false;
 
         // Compute live state hash (use custom callback if set, otherwise use engine's hash)
         let currentHash = '--------';
@@ -125,7 +129,8 @@ export function enableDebugUI(target?: DebugUITarget, options: DebugUIOptions = 
                 const hash = hashCallback();
                 currentHash = typeof hash === 'number' ? hash.toString(16).padStart(8, '0') : String(hash).slice(0, 8);
             } else {
-                currentHash = eng.getStateHash();
+                const hash = eng.getStateHash();
+                currentHash = hash.toString(16).padStart(8, '0');
             }
         } catch (e) {
             currentHash = 'error';
@@ -141,25 +146,40 @@ export function enableDebugUI(target?: DebugUITarget, options: DebugUIOptions = 
         const upStr = formatBandwidth(up);
         const downStr = formatBandwidth(down);
 
-        // Get drift stats (field-by-field comparison)
-        const driftStats = (eng as any).getDriftStats?.() || { determinismPercent: 100, totalChecks: 0, matchingFieldCount: 0, totalFieldCount: 0 };
-        const detPct = (Math.floor(driftStats.determinismPercent * 10) / 10).toFixed(1);
-        const detColor = driftStats.determinismPercent === 100 ? '#0f0' :
-                        driftStats.determinismPercent >= 99 ? '#ff0' : '#f00';
+        // Get delta bandwidth for sync status
+        const deltaBw = (eng as any).getDeltaBandwidth?.() || 0;
+
+        // Get hash-based sync stats
+        const syncStats = (eng as any).getSyncStats?.() || { syncPercent: 100, passed: 0, failed: 0, isDesynced: false, resyncPending: false };
+        const totalHashChecks = syncStats.passed + syncStats.failed;
 
         // Format sync status
+        // Priority: 1) Show resync status if pending, 2) Show hash-based sync %, 3) Show "active" if delta bw > 0
         let syncStatus: string;
-        if (isAuthority) {
-            syncStatus = '<span style="color:#888">I\'m authority</span>';
-        } else if (driftStats.totalChecks === 0) {
-            syncStatus = '<span style="color:#888">waiting...</span>';
+        if (syncStats.resyncPending) {
+            // Waiting for resync snapshot
+            syncStatus = '<span style="color:#f80">resyncing...</span>';
+        } else if (syncStats.isDesynced) {
+            // Desynced but no resync available
+            syncStatus = '<span style="color:#f00">DESYNCED</span>';
+        } else if (totalHashChecks > 0) {
+            // Have hash-based sync stats - show percentage
+            const syncPct = (Math.floor(syncStats.syncPercent * 10) / 10).toFixed(1);
+            const syncColor = syncStats.syncPercent === 100 ? '#0f0' :
+                            syncStats.syncPercent >= 99 ? '#ff0' : '#f00';
+            syncStatus = `<span style="color:${syncColor}">${syncPct}%</span> <span style="color:#888">(${totalHashChecks} checks)</span>`;
+        } else if (deltaBw > 0) {
+            // Sending state hashes but no comparisons yet
+            syncStatus = '<span style="color:#0f0">active</span>';
         } else {
-            syncStatus = `<span style="color:${detColor}">${detPct}%</span> <span style="color:#888">(${driftStats.matchingFieldCount}/${driftStats.totalFieldCount})</span>`;
+            // Not connected or sync not started
+            syncStatus = '<span style="color:#888">-</span>';
         }
 
         // Format received snapshot info with frames ago
         const framesAgo = lastSnap.frame ? frame - lastSnap.frame : 0;
-        const snapInfo = lastSnap.hash ? `${lastSnap.hash.slice(0, 8)} <span style="color:#888">(${framesAgo} ago)</span>` : 'none';
+        const snapHashStr = lastSnap.hash !== null ? lastSnap.hash.toString(16).padStart(8, '0') : null;
+        const snapInfo = snapHashStr ? `${snapHashStr} <span style="color:#888">(${framesAgo} ago)</span>` : 'none';
 
         // Format size with appropriate units
         const formatSize = (bytes: number): string => {
@@ -171,32 +191,34 @@ export function enableDebugUI(target?: DebugUITarget, options: DebugUIOptions = 
             return bytes + ' B';
         };
         const sizeStr = lastSnap.size > 0 ? formatSize(lastSnap.size) : '-';
-        const entityStr = lastSnap.entityCount > 0 ? String(lastSnap.entityCount) : '-';
+        // Use local world entity count, not received snapshot count
+        const localEntityCount = (eng as any).getEntityCount?.() || 0;
+        const entityStr = localEntityCount > 0 ? String(localEntityCount) : '-';
 
         // Section header style
         const sectionStyle = 'color:#666;font-size:10px;margin-top:6px;margin-bottom:2px;border-bottom:1px solid #333;';
+
+        const deltaBwStr = formatBandwidth(deltaBw);
 
         debugDiv.innerHTML = `
             <div style="${sectionStyle}">ROOM</div>
             <div>ID: <span style="color:#fff">${roomId || '-'}</span></div>
             <div>Players: <span style="color:#ff0">${clients.length}</span></div>
             <div>Frame: <span style="color:#fff">${frame}</span></div>
-            <div>URL: <span style="color:#0ff">${nodeUrl || '-'}</span></div>
 
-            <div style="${sectionStyle}">ME</div>
-            <div>Authority: <span style="color:${isAuthority ? '#0ff' : '#888'}">${isAuthority ? 'Yes' : 'No'}</span></div>
-            <div>Client: <span style="color:#ff0">${clientId ? clientId.slice(0, 8) : '-'}</span></div>
+            <div style="${sectionStyle}">CLIENT</div>
+            <div>ID: <span style="color:#ff0">${clientId ? clientId.slice(0, 8) : '-'}</span></div>
 
             <div style="${sectionStyle}">ENGINE</div>
             <div>Commit: <span style="color:#888">${ENGINE_VERSION}</span></div>
             <div>FPS: <span style="color:#0f0">${renderFps}</span> render, <span style="color:#0f0">${fps}</span> tick</div>
             <div>Net: <span style="color:#0f0">${upStr}</span> up, <span style="color:#f80">${downStr}</span> down</div>
 
-            <div style="${sectionStyle}">SNAPSHOT</div>
-            <div>Current: <span style="color:#f0f">${currentHash}</span></div>
-            <div>Received: <span style="color:#f80">${snapInfo}</span></div>
-            <div>Size: <span style="color:#fff">${sizeStr}</span>, Entities: <span style="color:#fff">${entityStr}</span></div>
-            <div>Last Sync: ${syncStatus}</div>
+            <div style="${sectionStyle}">STATE SYNC</div>
+            <div>Hash: <span style="color:#f0f">${currentHash}</span></div>
+            <div>Delta: <span style="color:#0ff">${deltaBwStr}</span></div>
+            <div>Sync: ${syncStatus}</div>
+            <div>Entities: <span style="color:#fff">${entityStr}</span></div>
         `;
     };
 

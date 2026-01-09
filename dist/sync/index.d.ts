@@ -1,6 +1,8 @@
 /**
  * Sync Module
  *
- * Rollback networking for deterministic multiplayer.
+ * Distributed state synchronization for deterministic multiplayer.
+ * Uses consensus-based verification (stateHash + partitioned delta) instead of rollback.
  */
-export { PlayerInput, InputBuffer, Snapshot, RollbackConfig, RollbackManager, createRollbackManager, addPlayer, addPlayerAtFrame, clearSnapshotsBefore, removePlayer, addLocalInput, addRemoteInput, getInputsForFrame, saveSnapshot, loadSnapshot, checkRollback, performRollback, advanceFrame, getInputsToSend, getSyncState, getRollbackStats } from './rollback';
+export { StateDelta, CreatedEntity, UpdatedEntity, PartitionDelta, computeStateDelta, computeSnapshotHash, serializeDelta, deserializeDelta, getPartition, deserializePartition, assemblePartitions, applyDelta, isDeltaEmpty, getDeltaSize, getEntityPartition } from './state-delta';
+export { PartitionAssignment, DegradationTier, computePartitionAssignment, computePartitionCount, computePartitionSeed, weightedRandomPick, isClientAssigned, getClientPartitions, computeDegradationTier } from './partition';

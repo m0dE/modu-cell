@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-08T18:00:57.861Z - Commit: c16da3d */
+/* Modu Engine - Built: 2026-01-09T21:55:05.677Z - Commit: e02003d */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -328,7 +328,12 @@ var moduNetwork = (() => {
     CLIENT_LIST_UPDATE: 9,
     // Client-to-server markers (also used for server broadcast)
     BINARY_INPUT: 32,
-    BINARY_SNAPSHOT: 33
+    BINARY_SNAPSHOT: 33,
+    // Distributed State Sync (0x30+)
+    STATE_HASH: 48,
+    // Client -> Server: [0x30][frame:4][stateHash:4] = 9 bytes
+    PARTITION_DATA: 49
+    // Client -> Server: [0x31][frame:4][partitionId:1][len:2][data:N]
   };
   function hashClientId(clientId) {
     let hash = 2166136261;
@@ -753,6 +758,28 @@ var moduNetwork = (() => {
           },
           getLatency() {
             return "0";
+          },
+          sendStateHash(frame, hash) {
+            if (!connected || !ws || ws.readyState !== 1) return;
+            const buffer = new Uint8Array(9);
+            const view = new DataView(buffer.buffer);
+            buffer[0] = BinaryMessageType.STATE_HASH;
+            view.setUint32(1, frame, true);
+            view.setUint32(5, hash >>> 0, true);
+            bytesOut += 9;
+            ws.send(buffer);
+          },
+          sendPartitionData(frame, partitionId, data) {
+            if (!connected || !ws || ws.readyState !== 1) return;
+            const buffer = new Uint8Array(8 + data.length);
+            const view = new DataView(buffer.buffer);
+            buffer[0] = BinaryMessageType.PARTITION_DATA;
+            view.setUint32(1, frame, true);
+            buffer[5] = partitionId;
+            view.setUint16(6, data.length, true);
+            buffer.set(data, 8);
+            bytesOut += buffer.length;
+            ws.send(buffer);
           }
         };
         ws.onopen = () => {
@@ -1021,20 +1048,22 @@ var Modu = (() => {
     SystemScheduler: () => SystemScheduler,
     Transform2D: () => Transform2D,
     World: () => World,
-    addLocalInput: () => addLocalInput,
-    addPlayer: () => addPlayer,
-    addPlayerAtFrame: () => addPlayerAtFrame,
-    addRemoteInput: () => addRemoteInput,
-    advanceFrame: () => advanceFrame,
-    checkRollback: () => checkRollback,
-    clearSnapshotsBefore: () => clearSnapshotsBefore,
+    applyDelta: () => applyDelta,
+    assemblePartitions: () => assemblePartitions,
     codec: () => codec_exports,
+    computeDegradationTier: () => computeDegradationTier,
+    computePartitionAssignment: () => computePartitionAssignment,
+    computePartitionCount: () => computePartitionCount,
+    computePartitionSeed: () => computePartitionSeed,
+    computeSnapshotHash: () => computeSnapshotHash,
+    computeStateDelta: () => computeStateDelta,
     createGame: () => createGame,
     createPhysics2DSystem: () => createPhysics2DSystem,
-    createRollbackManager: () => createRollbackManager,
     dRandom: () => dRandom,
     dSqrt: () => dSqrt,
     defineComponent: () => defineComponent,
+    deserializeDelta: () => deserializeDelta,
+    deserializePartition: () => deserializePartition,
     disableDeterminismGuard: () => disableDeterminismGuard,
     enableDebugUI: () => enableDebugUI,
     enableDeterminismGuard: () => enableDeterminismGuard,
@@ -1051,13 +1080,13 @@ var Modu = (() => {
     fpSign: () => fpSign,
     fpSin: () => fpSin,
     fpSqrt: () => fpSqrt,
-    getInputsForFrame: () => getInputsForFrame,
-    getInputsToSend: () => getInputsToSend,
-    getRollbackStats: () => getRollbackStats,
-    getSyncState: () => getSyncState,
+    getClientPartitions: () => getClientPartitions,
+    getDeltaSize: () => getDeltaSize,
+    getEntityPartition: () => getEntityPartition,
+    getPartition: () => getPartition,
+    isClientAssigned: () => isClientAssigned,
+    isDeltaEmpty: () => isDeltaEmpty,
     loadRandomState: () => loadRandomState,
-    loadSnapshot: () => loadSnapshot,
-    performRollback: () => performRollback,
     physics2d: () => physics2d_exports,
     physics3d: () => physics3d_exports,
     quatClone: () => quatClone,
@@ -1068,9 +1097,8 @@ var Modu = (() => {
     quatMul: () => quatMul,
     quatNormalize: () => quatNormalize,
     quatRotateVec3: () => quatRotateVec3,
-    removePlayer: () => removePlayer,
     saveRandomState: () => saveRandomState,
-    saveSnapshot: () => saveSnapshot,
+    serializeDelta: () => serializeDelta,
     toFixed: () => toFixed,
     toFloat: () => toFloat,
     vec2: () => vec2,
@@ -1105,7 +1133,11 @@ var Modu = (() => {
     vec3Scale: () => vec3Scale,
     vec3Sub: () => vec3Sub,
     vec3ToFloats: () => vec3ToFloats,
-    vec3Zero: () => vec3Zero
+    vec3Zero: () => vec3Zero,
+    weightedRandomPick: () => weightedRandomPick,
+    xxhash32: () => xxhash32,
+    xxhash32Combine: () => xxhash32Combine,
+    xxhash32String: () => xxhash32String
   });
 
   // src/math/fixed.ts
@@ -3142,165 +3174,95 @@ var Modu = (() => {
     }
   };
 
-  // src/core/input-history.ts
-  var FrameInputImpl = class {
-    constructor(frame) {
-      this.frame = frame;
-      this.inputs = /* @__PURE__ */ new Map();
-      this.confirmed = false;
+  // src/hash/xxhash.ts
+  var PRIME32_1 = 2654435761 >>> 0;
+  var PRIME32_2 = 2246822519 >>> 0;
+  var PRIME32_3 = 3266489917 >>> 0;
+  var PRIME32_4 = 668265263 >>> 0;
+  var PRIME32_5 = 374761393 >>> 0;
+  function add32(a, b) {
+    return (a >>> 0) + (b >>> 0) >>> 0;
+  }
+  function mul32(a, b) {
+    const al = a & 65535;
+    const ah = a >>> 16;
+    const bl = b & 65535;
+    const bh = b >>> 16;
+    const ll = al * bl;
+    const lh = al * bh;
+    const hl = ah * bl;
+    return ll + (lh + hl << 16) >>> 0;
+  }
+  function rotl32(value, count) {
+    return (value << count | value >>> 32 - count) >>> 0;
+  }
+  function readU32LE(data, offset) {
+    return (data[offset] | data[offset + 1] << 8 | data[offset + 2] << 16 | data[offset + 3] << 24) >>> 0;
+  }
+  function round(acc, input) {
+    acc = add32(acc, mul32(input, PRIME32_2));
+    acc = rotl32(acc, 13);
+    acc = mul32(acc, PRIME32_1);
+    return acc;
+  }
+  function xxhash32(data, seed = 0) {
+    seed = seed >>> 0;
+    const len = data.length;
+    let h32;
+    let i = 0;
+    if (len >= 16) {
+      let v1 = add32(add32(seed, PRIME32_1), PRIME32_2);
+      let v2 = add32(seed, PRIME32_2);
+      let v3 = seed;
+      let v4 = seed - PRIME32_1 >>> 0;
+      const limit = len - 16;
+      do {
+        v1 = round(v1, readU32LE(data, i));
+        i += 4;
+        v2 = round(v2, readU32LE(data, i));
+        i += 4;
+        v3 = round(v3, readU32LE(data, i));
+        i += 4;
+        v4 = round(v4, readU32LE(data, i));
+        i += 4;
+      } while (i <= limit);
+      h32 = rotl32(v1, 1) + rotl32(v2, 7) + rotl32(v3, 12) + rotl32(v4, 18);
+      h32 = h32 >>> 0;
+    } else {
+      h32 = add32(seed, PRIME32_5);
     }
-    /**
-     * Get inputs sorted by clientId for deterministic iteration.
-     */
-    getSortedInputs() {
-      const entries = Array.from(this.inputs.entries());
-      entries.sort((a, b) => a[0] - b[0]);
-      return entries;
+    h32 = add32(h32, len);
+    while (i + 4 <= len) {
+      h32 = add32(h32, mul32(readU32LE(data, i), PRIME32_3));
+      h32 = mul32(rotl32(h32, 17), PRIME32_4);
+      i += 4;
     }
-  };
-  var InputHistory = class {
-    /**
-     * Create InputHistory with optional max frame limit.
-     * @param maxFrames Maximum frames to keep (default 120)
-     */
-    constructor(maxFrames = 120) {
-      /** Stored frames: frame number -> FrameInput */
-      this.history = /* @__PURE__ */ new Map();
-      this.maxFrames = maxFrames;
+    while (i < len) {
+      h32 = add32(h32, mul32(data[i], PRIME32_5));
+      h32 = mul32(rotl32(h32, 11), PRIME32_1);
+      i++;
     }
-    /**
-     * Store input for a frame from a client.
-     * Used for local predictions before server confirmation.
-     *
-     * @param frame Frame number
-     * @param clientId Client ID (numeric)
-     * @param input Input data
-     */
-    setInput(frame, clientId, input) {
-      let frameInput = this.history.get(frame);
-      if (!frameInput) {
-        frameInput = new FrameInputImpl(frame);
-        this.history.set(frame, frameInput);
-      }
-      frameInput.inputs.set(clientId, input);
-    }
-    /**
-     * Mark a frame as server-confirmed with authoritative inputs.
-     * This replaces any local predictions with server-provided data.
-     *
-     * @param frame Frame number
-     * @param inputs Map of clientId -> input data from server
-     */
-    confirmFrame(frame, inputs) {
-      const frameInput = new FrameInputImpl(frame);
-      frameInput.confirmed = true;
-      for (const [clientId, data] of inputs) {
-        frameInput.inputs.set(clientId, data);
-      }
-      this.history.set(frame, frameInput);
-    }
-    /**
-     * Get input data for a specific frame.
-     *
-     * @param frame Frame number
-     * @returns FrameInput or undefined if not found
-     */
-    getFrame(frame) {
-      return this.history.get(frame);
-    }
-    /**
-     * Get ordered frames for resimulation.
-     * Returns frames in ascending order, skipping any missing frames.
-     *
-     * CRITICAL: Order must be deterministic for rollback to work.
-     *
-     * @param fromFrame Start frame (inclusive)
-     * @param toFrame End frame (inclusive)
-     * @returns Array of FrameInput in ascending frame order
-     */
-    getRange(fromFrame, toFrame) {
-      if (fromFrame > toFrame) {
-        return [];
-      }
-      const result = [];
-      for (const [frame, frameInput] of this.history) {
-        if (frame >= fromFrame && frame <= toFrame) {
-          result.push(frameInput);
-        }
-      }
-      result.sort((a, b) => a.frame - b.frame);
-      return result;
-    }
-    /**
-     * Remove frames before the specified frame number.
-     * Called to limit memory usage.
-     *
-     * @param beforeFrame Remove all frames with frame < beforeFrame
-     */
-    prune(beforeFrame) {
-      const toRemove = [];
-      for (const frame of this.history.keys()) {
-        if (frame < beforeFrame) {
-          toRemove.push(frame);
-        }
-      }
-      for (const frame of toRemove) {
-        this.history.delete(frame);
-      }
-    }
-    /**
-     * Serialize for snapshots (late joiner sync).
-     * CRITICAL: Must produce identical output across all clients.
-     *
-     * @returns Serializable state object
-     */
-    getState() {
-      const frames = [];
-      const sortedFrames = Array.from(this.history.entries()).sort((a, b) => a[0] - b[0]);
-      for (const [, frameInput] of sortedFrames) {
-        const sortedInputs = frameInput.getSortedInputs().map(([clientId, data]) => ({
-          clientId,
-          data
-        }));
-        frames.push({
-          frame: frameInput.frame,
-          inputs: sortedInputs,
-          confirmed: frameInput.confirmed
-        });
-      }
-      return { frames };
-    }
-    /**
-     * Restore from serialized state (for late joiner sync).
-     * Clears existing data before restoring.
-     *
-     * @param state Previously serialized state
-     */
-    setState(state) {
-      this.history.clear();
-      for (const frameData of state.frames) {
-        const frameInput = new FrameInputImpl(frameData.frame);
-        frameInput.confirmed = frameData.confirmed;
-        for (const { clientId, data } of frameData.inputs) {
-          frameInput.inputs.set(clientId, data);
-        }
-        this.history.set(frameData.frame, frameInput);
-      }
-    }
-    /**
-     * Get the number of frames currently stored.
-     * Useful for debugging and monitoring memory usage.
-     */
-    get size() {
-      return this.history.size;
-    }
-    /**
-     * Clear all stored history.
-     */
-    clear() {
-      this.history.clear();
-    }
-  };
+    h32 ^= h32 >>> 15;
+    h32 = mul32(h32, PRIME32_2);
+    h32 ^= h32 >>> 13;
+    h32 = mul32(h32, PRIME32_3);
+    h32 ^= h32 >>> 16;
+    return h32 >>> 0;
+  }
+  function xxhash32String(str, seed = 0) {
+    const encoder = new TextEncoder();
+    return xxhash32(encoder.encode(str), seed);
+  }
+  function xxhash32Combine(existingHash, newValue) {
+    let h = add32(existingHash, mul32(newValue >>> 0, PRIME32_3));
+    h = mul32(rotl32(h, 17), PRIME32_4);
+    h ^= h >>> 15;
+    h = mul32(h, PRIME32_2);
+    h ^= h >>> 13;
+    h = mul32(h, PRIME32_3);
+    h ^= h >>> 16;
+    return h >>> 0;
+  }
 
   // src/core/world.ts
   var EntityBuilder = class {
@@ -3411,18 +3373,10 @@ var Modu = (() => {
       /** True while running deterministic simulation phases */
       this._isSimulating = false;
       // ==========================================
-      // Client-Side Prediction (Phase 4)
+      // State Synchronization
       // ==========================================
-      /** Local client ID for prediction */
+      /** Local client ID for this client */
       this.localClientId = null;
-      /** Pending predictions awaiting server confirmation */
-      this.predictions = [];
-      /** Rollback buffer for state restoration */
-      this.rollbackBuffer = /* @__PURE__ */ new Map();
-      /** Maximum frames to keep in rollback buffer */
-      this.rollbackBufferSize = 60;
-      /** Input history for rollback resimulation */
-      this.inputHistory = new InputHistory(120);
       this.idAllocator = new EntityIdAllocator();
       this.entityPool = new EntityPool();
       this.strings = new StringRegistry();
@@ -4117,136 +4071,19 @@ var Modu = (() => {
       }
     }
     /**
-     * Handle local player input (client-side prediction).
-     * Applies input immediately for responsiveness.
-     */
-    handleLocalInput(input) {
-      if (this.localClientId === null) {
-        console.warn("Cannot handle local input: localClientId not set");
-        return;
-      }
-      const entity = this.getEntityByClientId(this.localClientId);
-      if (entity) {
-        entity._setInputData(input);
-      }
-      this.inputHistory.setInput(this.frame, this.localClientId, input);
-      this.predictions.push({
-        frame: this.frame,
-        input,
-        hash: this.getStateHash()
-      });
-    }
-    /**
-     * Process server-confirmed inputs.
-     * Detects mispredictions and triggers rollback if needed.
-     */
-    onServerTick(serverFrame, inputs) {
-      this.saveSnapshot(this.frame);
-      const inputMap = /* @__PURE__ */ new Map();
-      for (const input of inputs) {
-        inputMap.set(input.clientId, input.data);
-      }
-      this.inputHistory.confirmFrame(serverFrame, inputMap);
-      const minFrame = serverFrame - 120;
-      if (minFrame > 0) {
-        this.inputHistory.prune(minFrame);
-      }
-      const predictionIdx = this.predictions.findIndex((p) => p.frame === serverFrame);
-      if (predictionIdx !== -1) {
-        const prediction = this.predictions[predictionIdx];
-        const snapshot = this.rollbackBuffer.get(serverFrame);
-        if (snapshot) {
-          this.loadSparseSnapshot(snapshot);
-        }
-        this.tick(serverFrame, inputs);
-        const serverHash = this.getStateHash();
-        const mispredicted = serverHash !== prediction.hash;
-        if (mispredicted) {
-          this.onRollback?.(serverFrame);
-          this.resimulateFrom(serverFrame);
-        }
-        this.predictions = this.predictions.filter((p) => p.frame > serverFrame);
-        return mispredicted;
-      } else {
-        this.tick(serverFrame, inputs);
-        return false;
-      }
-    }
-    /**
-     * Save snapshot for potential rollback.
-     */
-    saveSnapshot(frame) {
-      const snapshot = this.getSparseSnapshot();
-      this.rollbackBuffer.set(frame, snapshot);
-      const minFrame = frame - this.rollbackBufferSize + 1;
-      for (const f of this.rollbackBuffer.keys()) {
-        if (f < minFrame) {
-          this.rollbackBuffer.delete(f);
-        }
-      }
-    }
-    /**
-     * Restore state from snapshot at frame.
-     */
-    restoreSnapshot(frame) {
-      const snapshot = this.rollbackBuffer.get(frame);
-      if (!snapshot) {
-        return false;
-      }
-      this.loadSparseSnapshot(snapshot);
-      return true;
-    }
-    /**
-     * Check if snapshot exists for frame.
-     */
-    hasSnapshot(frame) {
-      return this.rollbackBuffer.has(frame);
-    }
-    /**
-     * Get oldest frame in rollback buffer.
-     */
-    getOldestSnapshotFrame() {
-      let oldest;
-      for (const frame of this.rollbackBuffer.keys()) {
-        if (oldest === void 0 || frame < oldest) {
-          oldest = frame;
-        }
-      }
-      return oldest;
-    }
-    /**
-     * Resimulate from a frame forward to current frame.
-     * Uses stored inputs from input history.
-     *
-     * NOTE: This retrieves data from InputHistory but full tick logic
-     * will be implemented in Phase 2 of the rollback implementation plan.
-     */
-    resimulateFrom(fromFrame) {
-      const currentFrame = this.frame;
-      const framesToResim = this.inputHistory.getRange(fromFrame + 1, currentFrame);
-      if (framesToResim.length > 0) {
-        for (const frameInput of framesToResim) {
-          const inputs = [];
-          for (const [clientId, data] of frameInput.getSortedInputs()) {
-            inputs.push({ clientId, data });
-          }
-          this.tick(frameInput.frame, inputs);
-        }
-      }
-      this.frame = currentFrame;
-    }
-    /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Returns 4-byte unsigned integer (xxhash32).
      * Excludes components with sync: false (client-only state).
      */
     getStateHash() {
       const sortedEids = Array.from(this.activeEntities).sort((a, b) => a - b);
       let hash = 0;
+      hash = xxhash32Combine(hash, sortedEids.length);
       for (const eid of sortedEids) {
         const index = eid & INDEX_MASK;
         const components = this.entityComponents.get(eid) || [];
-        hash = hash * 31 + eid | 0;
+        hash = xxhash32Combine(hash, eid >>> 0);
         for (const component of components) {
           if (!component.sync)
             continue;
@@ -4254,30 +4091,18 @@ var Modu = (() => {
           for (const fieldName of fieldNames) {
             const arr = component.storage.fields[fieldName];
             const value = arr[index];
-            hash = hash * 31 + value | 0;
+            hash = xxhash32Combine(hash, value >>> 0);
           }
         }
       }
-      return (hash >>> 0).toString(16).padStart(8, "0");
+      return hash >>> 0;
     }
     /**
-     * Clear rollback buffer.
+     * Get deterministic hash as hex string (for debugging).
+     * @deprecated Use getStateHash() which returns a number.
      */
-    clearRollbackBuffer() {
-      this.rollbackBuffer.clear();
-      this.predictions = [];
-    }
-    /**
-     * Get pending prediction count.
-     */
-    getPendingPredictionCount() {
-      return this.predictions.length;
-    }
-    /**
-     * Check if we have pending predictions.
-     */
-    hasPendingPredictions() {
-      return this.predictions.length > 0;
+    getStateHashHex() {
+      return this.getStateHash().toString(16).padStart(8, "0");
     }
   };
 
@@ -4475,6 +4300,368 @@ var Modu = (() => {
     return decoder.readValue();
   }
 
+  // src/sync/state-delta.ts
+  function computeStateDelta(prevSnapshot, currentSnapshot) {
+    const allComponents = getAllComponents();
+    const prevEntities = /* @__PURE__ */ new Map();
+    const prevComponentData = /* @__PURE__ */ new Map();
+    if (prevSnapshot) {
+      for (let i = 0; i < prevSnapshot.entityMeta.length; i++) {
+        const meta = prevSnapshot.entityMeta[i];
+        prevEntities.set(meta.eid, meta);
+        const entityData = {};
+        for (const [compName, buffer] of prevSnapshot.componentData) {
+          const component = allComponents.get(compName);
+          if (!component)
+            continue;
+          const fields = {};
+          let offset = 0;
+          for (const fieldName of component.fieldNames) {
+            const arr = component.storage.fields[fieldName];
+            const bytesPerElement = arr.BYTES_PER_ELEMENT;
+            const packedArr = new arr.constructor(buffer, offset, prevSnapshot.entityCount);
+            fields[fieldName] = packedArr[i];
+            offset += prevSnapshot.entityCount * bytesPerElement;
+          }
+          entityData[compName] = fields;
+        }
+        prevComponentData.set(meta.eid, entityData);
+      }
+    }
+    const currentEntities = /* @__PURE__ */ new Map();
+    const currentComponentData = /* @__PURE__ */ new Map();
+    for (let i = 0; i < currentSnapshot.entityMeta.length; i++) {
+      const meta = currentSnapshot.entityMeta[i];
+      currentEntities.set(meta.eid, meta);
+      const entityData = {};
+      for (const [compName, buffer] of currentSnapshot.componentData) {
+        const component = allComponents.get(compName);
+        if (!component)
+          continue;
+        const fields = {};
+        let offset = 0;
+        for (const fieldName of component.fieldNames) {
+          const arr = component.storage.fields[fieldName];
+          const bytesPerElement = arr.BYTES_PER_ELEMENT;
+          const packedArr = new arr.constructor(buffer, offset, currentSnapshot.entityCount);
+          fields[fieldName] = packedArr[i];
+          offset += currentSnapshot.entityCount * bytesPerElement;
+        }
+        entityData[compName] = fields;
+      }
+      currentComponentData.set(meta.eid, entityData);
+    }
+    const created = [];
+    const updated = [];
+    const deleted = [];
+    for (const [eid, meta] of currentEntities) {
+      const currentData = currentComponentData.get(eid);
+      if (!prevEntities.has(eid)) {
+        created.push({
+          eid,
+          type: meta.type,
+          clientId: meta.clientId,
+          components: currentData
+        });
+      } else {
+        const prevData = prevComponentData.get(eid);
+        const changes = {};
+        let hasChanges = false;
+        for (const [compName, currentFields] of Object.entries(currentData)) {
+          const prevFields = prevData[compName] || {};
+          const fieldChanges = {};
+          for (const [fieldName, currentValue] of Object.entries(currentFields)) {
+            const prevValue = prevFields[fieldName];
+            if (prevValue !== currentValue) {
+              fieldChanges[fieldName] = currentValue;
+              hasChanges = true;
+            }
+          }
+          if (Object.keys(fieldChanges).length > 0) {
+            changes[compName] = fieldChanges;
+          }
+        }
+        if (hasChanges) {
+          updated.push({ eid, changes });
+        }
+      }
+    }
+    if (prevSnapshot) {
+      for (const [eid] of prevEntities) {
+        if (!currentEntities.has(eid)) {
+          deleted.push(eid);
+        }
+      }
+    }
+    created.sort((a, b) => a.eid - b.eid);
+    updated.sort((a, b) => a.eid - b.eid);
+    deleted.sort((a, b) => a - b);
+    return {
+      frame: currentSnapshot.frame,
+      baseHash: prevSnapshot ? computeSnapshotHash(prevSnapshot) : 0,
+      resultHash: computeSnapshotHash(currentSnapshot),
+      created,
+      updated,
+      deleted
+    };
+  }
+  function computeSnapshotHash(snapshot) {
+    const allComponents = getAllComponents();
+    let hash = 0;
+    hash = xxhash32Combine(hash, snapshot.frame);
+    hash = xxhash32Combine(hash, snapshot.entityCount);
+    for (let i = 0; i < snapshot.entityMeta.length; i++) {
+      const meta = snapshot.entityMeta[i];
+      hash = xxhash32Combine(hash, meta.eid);
+      for (const [compName, buffer] of snapshot.componentData) {
+        const component = allComponents.get(compName);
+        if (!component)
+          continue;
+        let offset = 0;
+        for (const fieldName of component.fieldNames) {
+          const arr = component.storage.fields[fieldName];
+          const bytesPerElement = arr.BYTES_PER_ELEMENT;
+          const packedArr = new arr.constructor(buffer, offset, snapshot.entityCount);
+          const value = packedArr[i];
+          hash = xxhash32Combine(hash, value >>> 0);
+          offset += snapshot.entityCount * bytesPerElement;
+        }
+      }
+    }
+    return hash >>> 0;
+  }
+  function serializeDelta(delta) {
+    const json = JSON.stringify(delta);
+    const encoder = new TextEncoder();
+    return encoder.encode(json);
+  }
+  function deserializeDelta(bytes) {
+    const decoder = new TextDecoder();
+    const json = decoder.decode(bytes);
+    return JSON.parse(json);
+  }
+  function getPartition(delta, partitionId, numPartitions) {
+    const partitionCreated = delta.created.filter(
+      (e) => getEntityPartition(e.eid, numPartitions) === partitionId
+    );
+    const partitionUpdated = delta.updated.filter(
+      (e) => getEntityPartition(e.eid, numPartitions) === partitionId
+    );
+    const partitionDeleted = delta.deleted.filter(
+      (eid) => getEntityPartition(eid, numPartitions) === partitionId
+    );
+    const partitionDelta = {
+      partitionId,
+      numPartitions,
+      frame: delta.frame,
+      created: partitionCreated,
+      updated: partitionUpdated,
+      deleted: partitionDeleted
+    };
+    const json = JSON.stringify(partitionDelta);
+    const encoder = new TextEncoder();
+    return encoder.encode(json);
+  }
+  function getEntityPartition(eid, numPartitions) {
+    return eid % numPartitions;
+  }
+  function deserializePartition(bytes) {
+    const decoder = new TextDecoder();
+    const json = decoder.decode(bytes);
+    return JSON.parse(json);
+  }
+  function assemblePartitions(partitions) {
+    if (partitions.length === 0)
+      return null;
+    const frame = partitions[0].frame;
+    const numPartitions = partitions[0].numPartitions;
+    for (const p of partitions) {
+      if (p.frame !== frame) {
+        console.warn("Partition frame mismatch");
+        return null;
+      }
+    }
+    const created = [];
+    const updated = [];
+    const deleted = [];
+    for (const p of partitions) {
+      created.push(...p.created);
+      updated.push(...p.updated);
+      deleted.push(...p.deleted);
+    }
+    created.sort((a, b) => a.eid - b.eid);
+    updated.sort((a, b) => a.eid - b.eid);
+    deleted.sort((a, b) => a - b);
+    return {
+      frame,
+      baseHash: 0,
+      // Not known from partitions
+      resultHash: 0,
+      // Not known from partitions
+      created,
+      updated,
+      deleted
+    };
+  }
+  function applyDelta(delta, createEntity, updateEntity, deleteEntity) {
+    for (const eid of delta.deleted) {
+      deleteEntity(eid);
+    }
+    for (const entity of delta.created) {
+      createEntity(entity.eid, entity.type, entity.clientId, entity.components);
+    }
+    for (const entity of delta.updated) {
+      updateEntity(entity.eid, entity.changes);
+    }
+    return {
+      created: delta.created.map((e) => e.eid),
+      updated: delta.updated.map((e) => e.eid),
+      deleted: delta.deleted
+    };
+  }
+  function isDeltaEmpty(delta) {
+    return delta.created.length === 0 && delta.updated.length === 0 && delta.deleted.length === 0;
+  }
+  function getDeltaSize(delta) {
+    let size = 16;
+    for (const entity of delta.created) {
+      size += 12;
+      size += JSON.stringify(entity.components).length;
+    }
+    for (const entity of delta.updated) {
+      size += 4;
+      size += JSON.stringify(entity.changes).length;
+    }
+    size += delta.deleted.length * 4;
+    return size;
+  }
+
+  // src/sync/partition.ts
+  var FP_SCALE = 65536;
+  function computePartitionAssignment(entityCount, clientIds, frame, reliability, sendersPerPartition = 2) {
+    const sortedClients = [...clientIds].sort();
+    const numPartitions = computePartitionCount(entityCount, sortedClients.length);
+    const partitionSenders = /* @__PURE__ */ new Map();
+    for (let partitionId = 0; partitionId < numPartitions; partitionId++) {
+      const seed = computePartitionSeed(frame, partitionId);
+      const senders = weightedRandomPick(
+        sortedClients,
+        Math.min(sendersPerPartition, sortedClients.length),
+        seed,
+        reliability
+      );
+      partitionSenders.set(partitionId, senders);
+    }
+    return {
+      partitionSenders,
+      numPartitions,
+      frame
+    };
+  }
+  function computePartitionCount(entityCount, clientCount) {
+    if (clientCount <= 0)
+      return 1;
+    if (entityCount <= 0)
+      return 1;
+    const targetEntitiesPerPartition = 30;
+    const idealPartitions = Math.ceil(entityCount / targetEntitiesPerPartition);
+    const minPartitions = 1;
+    const maxPartitions = Math.max(1, clientCount * 2);
+    return Math.max(minPartitions, Math.min(maxPartitions, idealPartitions));
+  }
+  function computePartitionSeed(frame, partitionId) {
+    let seed = 305419896;
+    seed = xxhash32Combine(seed, frame >>> 0);
+    seed = xxhash32Combine(seed, partitionId >>> 0);
+    return seed >>> 0;
+  }
+  function weightedRandomPick(clients, count, seed, reliability) {
+    if (clients.length === 0)
+      return [];
+    if (count >= clients.length)
+      return [...clients];
+    const result = [];
+    const available = [...clients];
+    let rng = seed;
+    for (let i = 0; i < count && available.length > 0; i++) {
+      const weights = computeFixedPointWeights(available, reliability);
+      const selectedIdx = selectWeighted(weights, rng);
+      result.push(available[selectedIdx]);
+      available.splice(selectedIdx, 1);
+      rng = nextRandom(rng);
+    }
+    return result;
+  }
+  function computeFixedPointWeights(clients, reliability) {
+    const weights = [];
+    for (const clientId of clients) {
+      const rel = reliability[clientId] ?? 50;
+      const clampedRel = Math.max(0, Math.min(100, rel));
+      const weight = (clampedRel + 1) * FP_SCALE | 0;
+      weights.push(weight);
+    }
+    return weights;
+  }
+  function selectWeighted(weights, seed) {
+    if (weights.length === 0)
+      return -1;
+    if (weights.length === 1)
+      return 0;
+    let totalWeight = 0;
+    for (const w of weights) {
+      totalWeight = totalWeight + w | 0;
+    }
+    if (totalWeight <= 0) {
+      return seed % weights.length;
+    }
+    const randNormalized = (seed >>> 0) % FP_SCALE;
+    const threshold = mulFP(randNormalized, totalWeight);
+    let cumulative = 0;
+    for (let i = 0; i < weights.length; i++) {
+      cumulative = cumulative + weights[i] | 0;
+      if (threshold < cumulative) {
+        return i;
+      }
+    }
+    return weights.length - 1;
+  }
+  function mulFP(a, b) {
+    const result = BigInt(a >>> 0) * BigInt(b >>> 0) / BigInt(FP_SCALE);
+    return Number(result) | 0;
+  }
+  function nextRandom(state) {
+    let x = state >>> 0;
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    return x >>> 0;
+  }
+  function isClientAssigned(assignment, clientId, partitionId) {
+    const senders = assignment.partitionSenders.get(partitionId);
+    return senders?.includes(clientId) ?? false;
+  }
+  function getClientPartitions(assignment, clientId) {
+    const partitions = [];
+    for (const [partitionId, senders] of assignment.partitionSenders) {
+      if (senders.includes(clientId)) {
+        partitions.push(partitionId);
+      }
+    }
+    return partitions.sort((a, b) => a - b);
+  }
+  function computeDegradationTier(totalPartitions, receivedPartitions, trustedSenders, totalSenders) {
+    if (receivedPartitions === totalPartitions && trustedSenders === totalSenders) {
+      return "NORMAL";
+    }
+    if (receivedPartitions > totalPartitions * 0.75) {
+      return "DEGRADED";
+    }
+    if (receivedPartitions > totalPartitions * 0.25) {
+      return "MINIMAL";
+    }
+    return "SKIP";
+  }
+
   // src/game.ts
   var DEBUG_NETWORK = false;
   var Prefab = class {
@@ -4546,6 +4733,23 @@ var Modu = (() => {
       this.lastTickTime = 0;
       this.tickIntervalMs = 50;
       // 20fps default
+      // ==========================================
+      // State Sync
+      // ==========================================
+      /** Current reliability scores from server (clientId -> score) */
+      this.reliabilityScores = {};
+      /** Reliability scores version (for change detection) */
+      this.reliabilityVersion = 0;
+      /** Active client list (sorted, for deterministic partition assignment) */
+      this.activeClients = [];
+      /** Previous snapshot for delta computation */
+      this.prevSnapshot = null;
+      /** State sync enabled flag */
+      this.stateSyncEnabled = true;
+      /** Delta bandwidth tracking */
+      this.deltaBytesThisSecond = 0;
+      this.deltaBytesPerSecond = 0;
+      this.deltaBytesSampleTime = 0;
       // ==========================================
       // String Interning
       // ==========================================
@@ -4761,9 +4965,17 @@ var Modu = (() => {
     // ==========================================
     /**
      * Get deterministic state hash.
+     * Returns 4-byte unsigned integer (xxhash32).
      */
     getStateHash() {
       return this.world.getStateHash();
+    }
+    /**
+     * Get deterministic state hash as hex string (for debugging).
+     * @deprecated Use getStateHash() which returns a number.
+     */
+    getStateHashHex() {
+      return this.world.getStateHashHex();
     }
     /**
      * Reset game state.
@@ -4816,10 +5028,39 @@ var Modu = (() => {
           }
         });
         this.localClientIdStr = this.connection.clientId;
+        if (this.connection.onReliabilityUpdate !== void 0) {
+          this.connection.onReliabilityUpdate = (scores, version) => {
+            this.handleReliabilityUpdate(scores, version);
+          };
+        }
+        if (this.connection.onMajorityHash !== void 0) {
+          this.connection.onMajorityHash = (frame, hash) => {
+            this.handleMajorityHash(frame, hash);
+          };
+        }
       } catch (err) {
         console.warn("[ecs] Connection failed:", err?.message || err);
         this.connection = null;
         this.connectedRoomId = null;
+      }
+    }
+    /**
+     * Handle reliability score update from server.
+     */
+    handleReliabilityUpdate(scores, version) {
+      if (version <= this.reliabilityVersion) {
+        return;
+      }
+      this.reliabilityScores = scores;
+      this.reliabilityVersion = version;
+    }
+    /**
+     * Handle majority hash from server (for desync detection).
+     */
+    handleMajorityHash(frame, majorityHash) {
+      const localHash = this.world.getStateHash();
+      if (localHash !== majorityHash) {
+        console.warn(`[state-sync] Hash mismatch at frame ${frame}: local=${localHash.toString(16)} majority=${majorityHash.toString(16)}`);
       }
     }
     /**
@@ -4845,7 +5086,7 @@ var Modu = (() => {
       this.tickIntervalMs = 1e3 / fps;
       this.currentFrame = frame;
       if (snapshot?.hash !== void 0) {
-        this.lastSnapshotHash = typeof snapshot.hash === "number" ? snapshot.hash.toString(16).padStart(8, "0") : String(snapshot.hash);
+        this.lastSnapshotHash = typeof snapshot.hash === "number" ? snapshot.hash : parseInt(String(snapshot.hash), 16) || 0;
         this.lastSnapshotFrame = snapshot.frame || frame;
         this.lastSnapshotSize = snapshotSize;
         this.lastSnapshotEntityCount = snapshot.entities?.length || 0;
@@ -4933,6 +5174,46 @@ var Modu = (() => {
         this.pendingSnapshotUpload = false;
       }
       this.lastTickTime = typeof performance !== "undefined" ? performance.now() : Date.now();
+      this.sendStateSync(frame);
+    }
+    /**
+     * Send state synchronization data after tick.
+     * Sends stateHash to server, and partition data if this client is assigned.
+     */
+    sendStateSync(frame) {
+      if (!this.stateSyncEnabled || !this.connection?.sendStateHash) {
+        return;
+      }
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (now - this.deltaBytesSampleTime >= 1e3) {
+        this.deltaBytesPerSecond = this.deltaBytesThisSecond;
+        this.deltaBytesThisSecond = 0;
+        this.deltaBytesSampleTime = now;
+      }
+      const stateHash = this.world.getStateHash();
+      this.connection.sendStateHash(frame, stateHash);
+      this.deltaBytesThisSecond += 9;
+      if (this.activeClients.length > 0 && this.connection.clientId) {
+        const entityCount = this.world.entityCount;
+        const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+        const assignment = computePartitionAssignment(
+          entityCount,
+          this.activeClients,
+          frame,
+          this.reliabilityScores
+        );
+        const myPartitions = getClientPartitions(assignment, this.connection.clientId);
+        if (myPartitions.length > 0 && this.connection.sendPartitionData) {
+          const currentSnapshot = this.world.getSparseSnapshot();
+          const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+          for (const partitionId of myPartitions) {
+            const partitionData = getPartition(delta, partitionId, numPartitions);
+            this.connection.sendPartitionData(frame, partitionId, partitionData);
+            this.deltaBytesThisSecond += 8 + partitionData.length;
+          }
+          this.prevSnapshot = currentSnapshot;
+        }
+      }
     }
     /**
      * Process a network input (join/leave/game).
@@ -4965,6 +5246,10 @@ var Modu = (() => {
         if (!this.connectedClients.includes(clientId)) {
           this.connectedClients.push(clientId);
         }
+        if (!this.activeClients.includes(clientId)) {
+          this.activeClients.push(clientId);
+          this.activeClients.sort();
+        }
         if (this.authorityClientId === null) {
           this.authorityClientId = clientId;
         }
@@ -4987,6 +5272,10 @@ var Modu = (() => {
         const idx = this.connectedClients.indexOf(clientId);
         if (idx !== -1) {
           this.connectedClients.splice(idx, 1);
+        }
+        const activeIdx = this.activeClients.indexOf(clientId);
+        if (activeIdx !== -1) {
+          this.activeClients.splice(activeIdx, 1);
         }
         if (clientId === this.authorityClientId) {
           this.authorityClientId = this.connectedClients[0] || null;
@@ -5323,7 +5612,7 @@ var Modu = (() => {
         const serverSnapshot = decoded?.snapshot;
         const serverHash = decoded?.hash;
         if (serverSnapshot) {
-          this.lastSnapshotHash = serverHash;
+          this.lastSnapshotHash = typeof serverHash === "number" ? serverHash : (serverHash ? parseInt(String(serverHash), 16) : null) || null;
           this.lastSnapshotFrame = serverSnapshot.frame;
           this.lastSnapshotSize = data.length;
           this.lastSnapshotEntityCount = serverSnapshot.entities?.length || 0;
@@ -5540,18 +5829,11 @@ var Modu = (() => {
     startGameLoop() {
       if (this.gameLoop)
         return;
-      let lastSnapshotFrame = 0;
-      const isLocalhost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-      const SNAPSHOT_INTERVAL = isLocalhost ? 10 : 100;
       const loop = () => {
         if (this.renderer?.render) {
           this.renderer.render();
         } else if (this.callbacks.render) {
           this.callbacks.render();
-        }
-        if (this.checkIsAuthority() && this.currentFrame - lastSnapshotFrame >= SNAPSHOT_INTERVAL) {
-          this.sendSnapshot("loop");
-          lastSnapshotFrame = this.currentFrame;
         }
         this.gameLoop = requestAnimationFrame(loop);
       };
@@ -5735,6 +6017,30 @@ var Modu = (() => {
      */
     getCanvas() {
       return this.renderer?.element ?? null;
+    }
+    /**
+     * Get reliability scores (for debug UI).
+     */
+    getReliabilityScores() {
+      return { ...this.reliabilityScores };
+    }
+    /**
+     * Get active clients list (for debug UI).
+     */
+    getActiveClients() {
+      return [...this.activeClients];
+    }
+    /**
+     * Get local world entity count (for debug UI).
+     */
+    getEntityCount() {
+      return this.world.entityCount;
+    }
+    /**
+     * Get state sync delta bandwidth in bytes/second (for debug UI).
+     */
+    getDeltaBandwidth() {
+      return this.deltaBytesPerSecond;
     }
   };
   var GameEntityBuilder = class {
@@ -6463,7 +6769,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "c16da3d";
+  var ENGINE_VERSION = "e02003d";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
@@ -6522,14 +6828,14 @@ var Modu = (() => {
       const up = eng.getUploadRate();
       const down = eng.getDownloadRate();
       const clients = eng.getClients();
-      const isAuthority = eng.isAuthority?.() || false;
       let currentHash = "--------";
       try {
         if (hashCallback) {
           const hash = hashCallback();
           currentHash = typeof hash === "number" ? hash.toString(16).padStart(8, "0") : String(hash).slice(0, 8);
         } else {
-          currentHash = eng.getStateHash();
+          const hash = eng.getStateHash();
+          currentHash = hash.toString(16).padStart(8, "0");
         }
       } catch (e) {
         currentHash = "error";
@@ -6542,19 +6848,21 @@ var Modu = (() => {
       };
       const upStr = formatBandwidth(up);
       const downStr = formatBandwidth(down);
+      const deltaBw = eng.getDeltaBandwidth?.() || 0;
       const driftStats = eng.getDriftStats?.() || { determinismPercent: 100, totalChecks: 0, matchingFieldCount: 0, totalFieldCount: 0 };
       const detPct = (Math.floor(driftStats.determinismPercent * 10) / 10).toFixed(1);
       const detColor = driftStats.determinismPercent === 100 ? "#0f0" : driftStats.determinismPercent >= 99 ? "#ff0" : "#f00";
       let syncStatus;
-      if (isAuthority) {
-        syncStatus = `<span style="color:#888">I'm authority</span>`;
-      } else if (driftStats.totalChecks === 0) {
-        syncStatus = '<span style="color:#888">waiting...</span>';
-      } else {
+      if (driftStats.totalChecks > 0) {
         syncStatus = `<span style="color:${detColor}">${detPct}%</span> <span style="color:#888">(${driftStats.matchingFieldCount}/${driftStats.totalFieldCount})</span>`;
+      } else if (deltaBw > 0) {
+        syncStatus = '<span style="color:#0f0">active</span>';
+      } else {
+        syncStatus = '<span style="color:#888">-</span>';
       }
       const framesAgo = lastSnap.frame ? frame - lastSnap.frame : 0;
-      const snapInfo = lastSnap.hash ? `${lastSnap.hash.slice(0, 8)} <span style="color:#888">(${framesAgo} ago)</span>` : "none";
+      const snapHashStr = lastSnap.hash !== null ? lastSnap.hash.toString(16).padStart(8, "0") : null;
+      const snapInfo = snapHashStr ? `${snapHashStr} <span style="color:#888">(${framesAgo} ago)</span>` : "none";
       const formatSize = (bytes) => {
         if (bytes >= 1024 * 1024) {
           return (bytes / (1024 * 1024)).toFixed(2) + " MB";
@@ -6564,29 +6872,29 @@ var Modu = (() => {
         return bytes + " B";
       };
       const sizeStr = lastSnap.size > 0 ? formatSize(lastSnap.size) : "-";
-      const entityStr = lastSnap.entityCount > 0 ? String(lastSnap.entityCount) : "-";
+      const localEntityCount = eng.getEntityCount?.() || 0;
+      const entityStr = localEntityCount > 0 ? String(localEntityCount) : "-";
       const sectionStyle = "color:#666;font-size:10px;margin-top:6px;margin-bottom:2px;border-bottom:1px solid #333;";
+      const deltaBwStr = formatBandwidth(deltaBw);
       debugDiv.innerHTML = `
             <div style="${sectionStyle}">ROOM</div>
             <div>ID: <span style="color:#fff">${roomId || "-"}</span></div>
             <div>Players: <span style="color:#ff0">${clients.length}</span></div>
             <div>Frame: <span style="color:#fff">${frame}</span></div>
-            <div>URL: <span style="color:#0ff">${nodeUrl || "-"}</span></div>
 
-            <div style="${sectionStyle}">ME</div>
-            <div>Authority: <span style="color:${isAuthority ? "#0ff" : "#888"}">${isAuthority ? "Yes" : "No"}</span></div>
-            <div>Client: <span style="color:#ff0">${clientId ? clientId.slice(0, 8) : "-"}</span></div>
+            <div style="${sectionStyle}">CLIENT</div>
+            <div>ID: <span style="color:#ff0">${clientId ? clientId.slice(0, 8) : "-"}</span></div>
 
             <div style="${sectionStyle}">ENGINE</div>
             <div>Commit: <span style="color:#888">${ENGINE_VERSION}</span></div>
             <div>FPS: <span style="color:#0f0">${renderFps}</span> render, <span style="color:#0f0">${fps}</span> tick</div>
             <div>Net: <span style="color:#0f0">${upStr}</span> up, <span style="color:#f80">${downStr}</span> down</div>
 
-            <div style="${sectionStyle}">SNAPSHOT</div>
-            <div>Current: <span style="color:#f0f">${currentHash}</span></div>
-            <div>Received: <span style="color:#f80">${snapInfo}</span></div>
-            <div>Size: <span style="color:#fff">${sizeStr}</span>, Entities: <span style="color:#fff">${entityStr}</span></div>
-            <div>Last Sync: ${syncStatus}</div>
+            <div style="${sectionStyle}">STATE SYNC</div>
+            <div>Hash: <span style="color:#f0f">${currentHash}</span></div>
+            <div>Delta: <span style="color:#0ff">${deltaBwStr}</span></div>
+            <div>Sync: ${syncStatus}</div>
+            <div>Entities: <span style="color:#fff">${entityStr}</span></div>
         `;
     };
     const loop = (now) => {
@@ -9270,392 +9578,6 @@ var Modu = (() => {
       body.isSleeping = bs.isSleeping;
       body.sleepFrames = bs.sleepFrames;
     }
-  }
-
-  // src/sync/rollback.ts
-  var DEBUG_ROLLBACK = false;
-  function createRollbackManager(localPlayerId, config = {}) {
-    const inputDelay = config.inputDelay ?? 2;
-    return {
-      currentFrame: 0,
-      localPlayerId,
-      players: /* @__PURE__ */ new Set([localPlayerId]),
-      config: {
-        inputDelay,
-        maxRollbackFrames: config.maxRollbackFrames ?? 8,
-        maxPredictionFrames: config.maxPredictionFrames ?? 8,
-        snapshotInterval: config.snapshotInterval ?? 1
-      },
-      inputBuffer: {
-        inputs: /* @__PURE__ */ new Map(),
-        lastConfirmedFrame: -1,
-        // Initialize lastReceivedFrame for local player
-        // This prevents confirmedFrame from being stuck at -1
-        lastReceivedFrame: /* @__PURE__ */ new Map([[localPlayerId, 0]])
-      },
-      localInputQueue: [],
-      snapshots: /* @__PURE__ */ new Map(),
-      // These must be set by the game
-      saveState: () => ({}),
-      loadState: () => {
-      },
-      tick: () => {
-      },
-      computeChecksum: () => 0,
-      rollbackCount: 0,
-      maxRollbackDepth: 0,
-      predictionMisses: 0
-    };
-  }
-  function addPlayer(manager, playerId) {
-    manager.players.add(playerId);
-    manager.inputBuffer.lastReceivedFrame.set(playerId, -1);
-  }
-  function addPlayerAtFrame(manager, playerId, joinFrame) {
-    manager.players.add(playerId);
-    manager.inputBuffer.lastReceivedFrame.set(playerId, joinFrame);
-    if (joinFrame - 1 > manager.inputBuffer.lastConfirmedFrame) {
-      manager.inputBuffer.lastConfirmedFrame = joinFrame - 1;
-    }
-  }
-  function clearSnapshotsBefore(manager, frame) {
-    for (const snapshotFrame of manager.snapshots.keys()) {
-      if (snapshotFrame < frame) {
-        manager.snapshots.delete(snapshotFrame);
-      }
-    }
-    for (const inputFrame of manager.inputBuffer.inputs.keys()) {
-      if (inputFrame < frame) {
-        manager.inputBuffer.inputs.delete(inputFrame);
-      }
-    }
-  }
-  function removePlayer(manager, playerId) {
-    manager.players.delete(playerId);
-    manager.inputBuffer.lastReceivedFrame.delete(playerId);
-  }
-  function addLocalInput(manager, data) {
-    const { currentFrame, config, localPlayerId, inputBuffer } = manager;
-    const targetFrame = currentFrame + config.inputDelay;
-    const input = {
-      frame: targetFrame,
-      playerId: localPlayerId,
-      data,
-      predicted: false
-    };
-    manager.localInputQueue.push(input);
-    addInputToBuffer(manager, input);
-    const lastReceived = inputBuffer.lastReceivedFrame.get(localPlayerId) ?? -1;
-    if (targetFrame > lastReceived) {
-      inputBuffer.lastReceivedFrame.set(localPlayerId, targetFrame);
-    }
-    for (let f = currentFrame; f < targetFrame; f++) {
-      const frameInputs = inputBuffer.inputs.get(f);
-      const existingInput = frameInputs?.find((i) => i.playerId === localPlayerId);
-      if (!existingInput) {
-        const prediction = {
-          frame: f,
-          playerId: localPlayerId,
-          data,
-          predicted: true
-        };
-        addInputToBuffer(manager, prediction);
-      } else if (existingInput.predicted) {
-        existingInput.data = data;
-      } else if (f === currentFrame) {
-        existingInput.data = data;
-      }
-    }
-  }
-  function addRemoteInput(manager, frame, playerId, data) {
-    const { config, inputBuffer, currentFrame } = manager;
-    const input = {
-      frame,
-      playerId,
-      data,
-      predicted: false
-    };
-    addInputToBuffer(manager, input);
-    const predictionStartFrame = Math.max(0, frame - config.inputDelay);
-    const predictionEndFrame = frame;
-    for (let f = predictionStartFrame; f < predictionEndFrame; f++) {
-      const isPastFrame = f <= currentFrame;
-      const isFutureButSoon = f > currentFrame && f < currentFrame + config.inputDelay;
-      const isTooOld = f < currentFrame - config.maxRollbackFrames;
-      if ((isPastFrame || isFutureButSoon) && !isTooOld) {
-        const frameInputs = inputBuffer.inputs.get(f);
-        const existingConfirmed = frameInputs?.find((i) => i.playerId === playerId && !i.predicted);
-        if (existingConfirmed) {
-          if (f === currentFrame) {
-            existingConfirmed.data = data;
-          }
-          continue;
-        }
-        const backfilledInput = {
-          frame: f,
-          playerId,
-          data,
-          predicted: false
-        };
-        addInputToBuffer(manager, backfilledInput);
-      }
-    }
-    const lastReceived = inputBuffer.lastReceivedFrame.get(playerId) ?? -1;
-    if (frame > lastReceived) {
-      inputBuffer.lastReceivedFrame.set(playerId, frame);
-    }
-  }
-  function addInputToBuffer(manager, input) {
-    const { inputBuffer } = manager;
-    if (!inputBuffer.inputs.has(input.frame)) {
-      inputBuffer.inputs.set(input.frame, []);
-    }
-    const frameInputs = inputBuffer.inputs.get(input.frame);
-    const existingIdx = frameInputs.findIndex((i) => i.playerId === input.playerId);
-    if (existingIdx >= 0) {
-      const existing = frameInputs[existingIdx];
-      if (existing.predicted && !input.predicted) {
-        if (inputsDifferSignificantly(existing.data, input.data)) {
-          manager.predictionMisses++;
-          const pendingRollback = manager.pendingRollbackFrame;
-          if (pendingRollback === void 0 || input.frame < pendingRollback) {
-            manager.pendingRollbackFrame = input.frame;
-          }
-          if (DEBUG_ROLLBACK) {
-            console.log(`[MISMATCH] frame=${input.frame} player=${input.playerId} predicted=${JSON.stringify(existing.data)} actual=${JSON.stringify(input.data)}`);
-          }
-        }
-      }
-      frameInputs[existingIdx] = input;
-    } else {
-      frameInputs.push(input);
-    }
-  }
-  function inputsDifferSignificantly(a, b) {
-    if (!a && !b)
-      return false;
-    if (!a || !b)
-      return true;
-    const continuousKeys = /* @__PURE__ */ new Set([
-      "yaw",
-      "yawFp",
-      "pitch",
-      "pitchFp",
-      "roll",
-      "rollFp",
-      "shootDirX",
-      "shootDirY",
-      "shootDirZ",
-      "lookX",
-      "lookY",
-      "rotX",
-      "rotY",
-      "rotZ",
-      "mouseX",
-      "mouseY",
-      "aimX",
-      "aimY",
-      "aimZ"
-    ]);
-    const allKeys = /* @__PURE__ */ new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
-    for (const key of allKeys) {
-      if (continuousKeys.has(key))
-        continue;
-      if (a[key] !== b[key]) {
-        return true;
-      }
-    }
-    return false;
-  }
-  function getInputsForFrame(manager, frame) {
-    const { inputBuffer, players, localPlayerId } = manager;
-    const inputs = [];
-    const sortedPlayers = Array.from(players).sort();
-    for (const playerId of sortedPlayers) {
-      const frameInputs = inputBuffer.inputs.get(frame);
-      const confirmed = frameInputs?.find((i) => i.playerId === playerId && !i.predicted);
-      if (confirmed) {
-        inputs.push(confirmed);
-        continue;
-      }
-      const existingPrediction = frameInputs?.find((i) => i.playerId === playerId && i.predicted);
-      if (existingPrediction) {
-        inputs.push(existingPrediction);
-        continue;
-      }
-      const predicted = predictInput(manager, frame, playerId);
-      inputs.push(predicted);
-      addInputToBuffer(manager, predicted);
-    }
-    return inputs;
-  }
-  function predictInput(manager, frame, playerId) {
-    const { inputBuffer } = manager;
-    let lastInput = null;
-    for (let f = frame - 1; f >= Math.max(0, frame - 60); f--) {
-      const frameInputs = inputBuffer.inputs.get(f);
-      const input = frameInputs?.find((i) => i.playerId === playerId && !i.predicted);
-      if (input) {
-        lastInput = input;
-        break;
-      }
-    }
-    const predictedData = lastInput ? { ...lastInput.data } : {
-      w: false,
-      a: false,
-      s: false,
-      d: false,
-      jump: false,
-      yawFp: 0
-    };
-    return {
-      frame,
-      playerId,
-      data: predictedData,
-      predicted: true
-    };
-  }
-  function saveSnapshot(manager) {
-    const { currentFrame, config, snapshots } = manager;
-    if (currentFrame % config.snapshotInterval !== 0)
-      return;
-    const snapshot = {
-      frame: currentFrame,
-      state: manager.saveState()
-    };
-    snapshots.set(currentFrame, snapshot);
-    const keepFrom = currentFrame - config.maxRollbackFrames - 10;
-    for (const frame of snapshots.keys()) {
-      if (frame < keepFrom) {
-        snapshots.delete(frame);
-      }
-    }
-  }
-  function loadSnapshot(manager, frame) {
-    const snapshot = manager.snapshots.get(frame);
-    if (!snapshot)
-      return false;
-    manager.loadState(snapshot.state);
-    return true;
-  }
-  function checkRollback(manager) {
-    const { currentFrame, config } = manager;
-    const pendingRollback = manager.pendingRollbackFrame;
-    if (pendingRollback !== void 0) {
-      manager.pendingRollbackFrame = void 0;
-      if (currentFrame - pendingRollback <= config.maxRollbackFrames) {
-        return pendingRollback;
-      } else if (DEBUG_ROLLBACK) {
-        console.warn(`[ROLLBACK_MISSED] frame=${pendingRollback} is too old (current=${currentFrame}, max=${config.maxRollbackFrames})`);
-      }
-    }
-    return null;
-  }
-  function performRollback(manager, toFrame) {
-    const { currentFrame } = manager;
-    let snapshotFrame = toFrame;
-    while (snapshotFrame >= 0 && !manager.snapshots.has(snapshotFrame)) {
-      snapshotFrame--;
-    }
-    if (snapshotFrame < 0) {
-      if (DEBUG_ROLLBACK)
-        console.warn("[ROLLBACK] No snapshot found for rollback");
-      return;
-    }
-    if (!loadSnapshot(manager, snapshotFrame)) {
-      if (DEBUG_ROLLBACK)
-        console.warn("[ROLLBACK] Failed to load snapshot");
-      return;
-    }
-    manager.rollbackCount++;
-    const rollbackDepth = currentFrame - snapshotFrame;
-    if (rollbackDepth > manager.maxRollbackDepth) {
-      manager.maxRollbackDepth = rollbackDepth;
-    }
-    if (DEBUG_ROLLBACK) {
-      console.log(`[ROLLBACK] Rolling back from ${currentFrame} to ${snapshotFrame} (${rollbackDepth} frames), available snapshots: ${[...manager.snapshots.keys()].sort((a, b) => a - b).join(",")}`);
-    }
-    for (let frame = snapshotFrame; frame < currentFrame; frame++) {
-      manager.currentFrame = frame;
-      saveSnapshot(manager);
-      const inputs = getInputsForFrame(manager, frame);
-      manager.tick(frame, inputs);
-      manager.currentFrame = frame + 1;
-    }
-  }
-  function advanceFrame(manager) {
-    let didRollback = false;
-    const rollbackTo = checkRollback(manager);
-    if (rollbackTo !== null && rollbackTo < manager.currentFrame) {
-      performRollback(manager, rollbackTo);
-      didRollback = true;
-    }
-    saveSnapshot(manager);
-    const inputs = getInputsForFrame(manager, manager.currentFrame);
-    manager.tick(manager.currentFrame, inputs);
-    manager.currentFrame++;
-    updateConfirmedFrame(manager);
-    cleanupInputs(manager);
-    return { inputs, didRollback };
-  }
-  function updateConfirmedFrame(manager) {
-    const { inputBuffer, players, currentFrame, config } = manager;
-    const startFrame = Math.max(
-      inputBuffer.lastConfirmedFrame + 1,
-      config.inputDelay
-      // First frame that could possibly have inputs
-    );
-    const sortedPlayers = Array.from(players).sort();
-    for (let frame = startFrame; frame < currentFrame; frame++) {
-      const frameInputs = inputBuffer.inputs.get(frame);
-      if (!frameInputs) {
-        break;
-      }
-      let allConfirmed = true;
-      for (const playerId of sortedPlayers) {
-        const input = frameInputs.find((i) => i.playerId === playerId && !i.predicted);
-        if (!input) {
-          allConfirmed = false;
-          break;
-        }
-      }
-      if (allConfirmed) {
-        inputBuffer.lastConfirmedFrame = frame;
-      } else {
-        break;
-      }
-    }
-  }
-  function cleanupInputs(manager) {
-    const { inputBuffer, config, currentFrame } = manager;
-    const keepFrom = currentFrame - config.maxRollbackFrames - 10;
-    for (const frame of inputBuffer.inputs.keys()) {
-      if (frame < keepFrom) {
-        inputBuffer.inputs.delete(frame);
-      }
-    }
-  }
-  function getInputsToSend(manager) {
-    const ready = manager.localInputQueue.filter((i) => i.frame <= manager.currentFrame + manager.config.inputDelay);
-    manager.localInputQueue = manager.localInputQueue.filter((i) => i.frame > manager.currentFrame + manager.config.inputDelay);
-    return ready;
-  }
-  function getSyncState(manager) {
-    return {
-      frame: manager.currentFrame,
-      checksum: manager.computeChecksum()
-    };
-  }
-  function getRollbackStats(manager) {
-    return {
-      currentFrame: manager.currentFrame,
-      confirmedFrame: manager.inputBuffer.lastConfirmedFrame,
-      rollbackCount: manager.rollbackCount,
-      maxRollbackDepth: manager.maxRollbackDepth,
-      predictionMisses: manager.predictionMisses,
-      snapshotCount: manager.snapshots.size,
-      inputBufferSize: manager.inputBuffer.inputs.size
-    };
   }
   return __toCommonJS(src_exports);
 })();

@@ -13,7 +13,7 @@ export interface DebugUITarget {
     getFrame(): number;
     getNodeUrl(): string | null;
     getLastSnapshot(): {
-        hash: string | null;
+        hash: number | null;
         frame: number;
         size: number;
         entityCount: number;
@@ -23,13 +23,23 @@ export interface DebugUITarget {
     getUploadRate(): number;
     getDownloadRate(): number;
     getClients(): string[];
-    getStateHash(): string;
-    isAuthority?(): boolean;
+    getStateHash(): number;
+    getEntityCount?(): number;
     getDriftStats?(): {
         determinismPercent: number;
         totalChecks: number;
         matchingFieldCount: number;
         totalFieldCount: number;
+    };
+    getReliabilityScores?(): Record<string, number>;
+    getActiveClients?(): string[];
+    getDeltaBandwidth?(): number;
+    getSyncStats?(): {
+        syncPercent: number;
+        passed: number;
+        failed: number;
+        isDesynced: boolean;
+        resyncPending: boolean;
     };
 }
 export interface DebugUIOptions {

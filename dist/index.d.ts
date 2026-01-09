@@ -24,3 +24,4 @@ export * as physics2d from './plugins/physics2d';
 export * as physics3d from './plugins/physics3d';
 export * from './sync';
 export * as codec from './codec';
+export * from './hash';
