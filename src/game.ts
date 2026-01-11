@@ -537,6 +537,32 @@ export class Game {
         this.currentFrame = 0;
     }
 
+    /**
+     * Start the game locally (offline mode).
+     *
+     * Use this for single-player or when you want to start the game
+     * before connecting to a server. The game will simulate locally
+     * at the configured tick rate.
+     *
+     * If you later call connect(), the game will sync to the server
+     * and switch to server-driven simulation.
+     *
+     * @param callbacks Optional callbacks (onTick, render, etc.)
+     */
+    start(callbacks: GameCallbacks = {}): void {
+        this.callbacks = { ...this.callbacks, ...callbacks };
+
+        // Call onRoomCreate for initial setup (like spawning entities)
+        if (this.callbacks.onRoomCreate) {
+            this.callbacks.onRoomCreate();
+        }
+
+        // Start the game loop (will tick locally since no connection)
+        this.startGameLoop();
+
+        if (DEBUG_NETWORK) console.log('[ecs] Started in local/offline mode');
+    }
+
     // ==========================================
     // Network Connection
     // ==========================================
@@ -2048,21 +2074,42 @@ export class Game {
     // ==========================================
 
     /**
-     * Start the render loop.
+     * Start the game loop (render + local simulation when offline).
+     *
+     * When connected to server: server TICK messages drive simulation via handleTick().
+     * When offline: simulation ticks locally at tickRate.
      */
     private startGameLoop(): void {
         if (this.gameLoop) return;
 
+        let lastTickTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
         const loop = () => {
+            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+            // Local simulation when not connected to server
+            // When connected, server TICK messages drive simulation via handleTick()
+            if (!this.connection) {
+                // Fixed timestep accumulator for deterministic simulation
+                while (now - lastTickTime >= this.tickIntervalMs) {
+                    this.currentFrame++;
+
+                    // Run ECS world tick (systems)
+                    this.world.tick(this.currentFrame, []);
+
+                    // Call game's onTick callback
+                    this.callbacks.onTick?.(this.currentFrame);
+
+                    lastTickTime += this.tickIntervalMs;
+                }
+            }
+
             // Render
             if (this.renderer?.render) {
                 this.renderer.render();
             } else if (this.callbacks.render) {
                 this.callbacks.render();
             }
-
-            // Note: With distributed state sync, we no longer send periodic snapshots.
-            // Snapshots are only sent on-demand for late joiners (server requests from any reliable client).
 
             this.gameLoop = requestAnimationFrame(loop);
         };

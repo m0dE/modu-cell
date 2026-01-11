@@ -3948,6 +3948,27 @@ var Modu = (() => {
       this.world.reset();
       this.currentFrame = 0;
     }
+    /**
+     * Start the game locally (offline mode).
+     *
+     * Use this for single-player or when you want to start the game
+     * before connecting to a server. The game will simulate locally
+     * at the configured tick rate.
+     *
+     * If you later call connect(), the game will sync to the server
+     * and switch to server-driven simulation.
+     *
+     * @param callbacks Optional callbacks (onTick, render, etc.)
+     */
+    start(callbacks = {}) {
+      this.callbacks = { ...this.callbacks, ...callbacks };
+      if (this.callbacks.onRoomCreate) {
+        this.callbacks.onRoomCreate();
+      }
+      this.startGameLoop();
+      if (DEBUG_NETWORK)
+        console.log("[ecs] Started in local/offline mode");
+    }
     // ==========================================
     // Network Connection
     // ==========================================
@@ -5031,12 +5052,25 @@ var Modu = (() => {
     // Game Loop
     // ==========================================
     /**
-     * Start the render loop.
+     * Start the game loop (render + local simulation when offline).
+     *
+     * When connected to server: server TICK messages drive simulation via handleTick().
+     * When offline: simulation ticks locally at tickRate.
      */
     startGameLoop() {
       if (this.gameLoop)
         return;
+      let lastTickTime = typeof performance !== "undefined" ? performance.now() : Date.now();
       const loop = () => {
+        const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+        if (!this.connection) {
+          while (now - lastTickTime >= this.tickIntervalMs) {
+            this.currentFrame++;
+            this.world.tick(this.currentFrame, []);
+            this.callbacks.onTick?.(this.currentFrame);
+            lastTickTime += this.tickIntervalMs;
+          }
+        }
         if (this.renderer?.render) {
           this.renderer.render();
         } else if (this.callbacks.render) {
@@ -8808,4 +8842,4 @@ var Modu = (() => {
   }
   return __toCommonJS(src_exports);
 })();
-//# sourceMappingURL=index.iife-CTLOOMDJ.js.map
+//# sourceMappingURL=index.iife-OBH75EXI.js.map
