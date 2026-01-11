@@ -4461,6 +4461,11 @@ var Game = class {
       if (this.checkIsAuthority()) {
         this.pendingSnapshotUpload = true;
       }
+    } else if (type === "resync_request") {
+      console.log(`[ecs-debug] RESYNC_REQUEST from ${clientId.slice(0, 8)}`);
+      if (this.checkIsAuthority()) {
+        this.pendingSnapshotUpload = true;
+      }
     } else if (type === "leave" || type === "disconnect") {
       const activeIdx = this.activeClients.indexOf(clientId);
       if (activeIdx !== -1) {
@@ -4607,16 +4612,7 @@ var Game = class {
         values
       ]);
     }
-    let maxIndex = 0;
-    const activeGenerations = {};
-    for (const e of entities) {
-      const eid = e[0];
-      const index = eid & INDEX_MASK;
-      const gen = eid >>> 20;
-      if (index >= maxIndex)
-        maxIndex = index + 1;
-      activeGenerations[index] = gen;
-    }
+    const allocatorState = this.world.idAllocator.getState();
     return {
       frame: this.currentFrame,
       seq: this.lastInputSeq,
@@ -4630,11 +4626,7 @@ var Game = class {
       // Component schemas indexed by type index
       entities,
       // Array of [eid, typeIndex, values[]]
-      idAllocatorState: {
-        nextIndex: maxIndex,
-        freeList: [],
-        generations: activeGenerations
-      },
+      idAllocatorState: allocatorState,
       rng: saveRandomState(),
       strings: this.world.strings.getState(),
       clientIdMap: {
@@ -6021,7 +6013,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "bc48df6";
+var ENGINE_VERSION = "9c49de7";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;

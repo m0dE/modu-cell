@@ -1497,6 +1497,13 @@ export class Game {
             if (this.checkIsAuthority()) {
                 this.pendingSnapshotUpload = true;
             }
+        } else if (type === 'resync_request') {
+            // Another client is requesting resync - authority should upload fresh snapshot
+            // This ensures resyncing clients get current state, not stale stored snapshot
+            console.log(`[ecs-debug] RESYNC_REQUEST from ${clientId.slice(0, 8)}`);
+            if (this.checkIsAuthority()) {
+                this.pendingSnapshotUpload = true;
+            }
         } else if (type === 'leave' || type === 'disconnect') {
             // Remove from activeClients
             const activeIdx = this.activeClients.indexOf(clientId);
@@ -1707,16 +1714,13 @@ export class Game {
             ]);
         }
 
-        // Compute minimal ID allocator state from entities
-        let maxIndex = 0;
-        const activeGenerations: Record<number, number> = {};
-        for (const e of entities) {
-            const eid = e[0];
-            const index = eid & INDEX_MASK;
-            const gen = eid >>> 20;
-            if (index >= maxIndex) maxIndex = index + 1;
-            activeGenerations[index] = gen;
-        }
+        // CRITICAL: Get the FULL allocator state, not just active entity generations.
+        // The previous "minimal" approach lost generation info for destroyed entity slots,
+        // causing entity ID collisions after refresh:
+        // - Authority had generation=N for a slot, late joiner had generation=0
+        // - When both allocated from the slot, they got different entity IDs
+        // - This caused permanent desync with identical entity counts but different hashes
+        const allocatorState = this.world.idAllocator.getState();
 
         return {
             frame: this.currentFrame,
@@ -1726,11 +1730,7 @@ export class Game {
             types,     // Type names array (sent once)
             schema,    // Component schemas indexed by type index
             entities,  // Array of [eid, typeIndex, values[]]
-            idAllocatorState: {
-                nextIndex: maxIndex,
-                freeList: [],
-                generations: activeGenerations
-            },
+            idAllocatorState: allocatorState,
             rng: saveRandomState(),
             strings: this.world.strings.getState(),
             clientIdMap: {
