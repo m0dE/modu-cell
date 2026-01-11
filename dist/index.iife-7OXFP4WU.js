@@ -4105,17 +4105,17 @@ var Modu = (() => {
         const connectDuration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - connectStartTime;
         console.log(`[ecs] Connected successfully in ${connectDuration.toFixed(0)}ms, clientId: ${this.connection.clientId}`);
         this.localClientIdStr = this.connection.clientId;
-        if (this.connection.onReliabilityUpdate !== void 0) {
+        if ("onReliabilityUpdate" in this.connection) {
           this.connection.onReliabilityUpdate = (scores, version) => {
             this.handleReliabilityUpdate(scores, version);
           };
         }
-        if (this.connection.onMajorityHash !== void 0) {
+        if ("onMajorityHash" in this.connection) {
           this.connection.onMajorityHash = (frame, hash) => {
             this.handleMajorityHash(frame, hash);
           };
         }
-        if (this.connection.onResyncSnapshot !== void 0) {
+        if ("onResyncSnapshot" in this.connection) {
           this.connection.onResyncSnapshot = (data, frame) => {
             this.handleResyncSnapshot(data, frame);
           };
@@ -6167,7 +6167,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "cdb32e0";
+  var ENGINE_VERSION = "b07b866";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
@@ -8984,4 +8984,4 @@ var Modu = (() => {
   }
   return __toCommonJS(src_exports);
 })();
-//# sourceMappingURL=index.iife-QGGQ54DP.js.map
+//# sourceMappingURL=index.iife-7OXFP4WU.js.map

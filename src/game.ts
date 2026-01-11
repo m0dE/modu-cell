@@ -771,19 +771,19 @@ export class Game {
 
             this.localClientIdStr = this.connection.clientId;
 
-            // Set up state sync callbacks
-            if (this.connection.onReliabilityUpdate !== undefined) {
-                this.connection.onReliabilityUpdate = (scores, version) => {
+            // Set up state sync callbacks (using 'in' check since properties may be undefined)
+            if ('onReliabilityUpdate' in this.connection) {
+                this.connection.onReliabilityUpdate = (scores: Record<string, number>, version: number) => {
                     this.handleReliabilityUpdate(scores, version);
                 };
             }
-            if (this.connection.onMajorityHash !== undefined) {
-                this.connection.onMajorityHash = (frame, hash) => {
+            if ('onMajorityHash' in this.connection) {
+                this.connection.onMajorityHash = (frame: number, hash: number) => {
                     this.handleMajorityHash(frame, hash);
                 };
             }
-            if (this.connection.onResyncSnapshot !== undefined) {
-                this.connection.onResyncSnapshot = (data, frame) => {
+            if ('onResyncSnapshot' in this.connection) {
+                this.connection.onResyncSnapshot = (data: Uint8Array, frame: number) => {
                     this.handleResyncSnapshot(data, frame);
                 };
             }

@@ -553,18 +553,18 @@ export class Game {
             const connectDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - connectStartTime;
             console.log(`[ecs] Connected successfully in ${connectDuration.toFixed(0)}ms, clientId: ${this.connection.clientId}`);
             this.localClientIdStr = this.connection.clientId;
-            // Set up state sync callbacks
-            if (this.connection.onReliabilityUpdate !== undefined) {
+            // Set up state sync callbacks (using 'in' check since properties may be undefined)
+            if ('onReliabilityUpdate' in this.connection) {
                 this.connection.onReliabilityUpdate = (scores, version) => {
                     this.handleReliabilityUpdate(scores, version);
                 };
             }
-            if (this.connection.onMajorityHash !== undefined) {
+            if ('onMajorityHash' in this.connection) {
                 this.connection.onMajorityHash = (frame, hash) => {
                     this.handleMajorityHash(frame, hash);
                 };
             }
-            if (this.connection.onResyncSnapshot !== undefined) {
+            if ('onResyncSnapshot' in this.connection) {
                 this.connection.onResyncSnapshot = (data, frame) => {
                     this.handleResyncSnapshot(data, frame);
                 };

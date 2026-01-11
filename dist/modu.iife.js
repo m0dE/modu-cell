@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-11T08:30:17.047Z - Commit: cdb32e0 */
+/* Modu Engine - Built: 2026-01-11T20:15:12.421Z - Commit: b07b866 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -927,6 +927,7 @@ var moduNetwork = (() => {
     const centralServiceUrl = options.centralServiceUrl || (typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") ? "http://localhost:9001" : "https://nodes.modd.io");
     console.log("[modu-network] Central service URL:", centralServiceUrl);
     let connected = false;
+    let initialConnectionComplete = false;
     let deliveredSeqs = /* @__PURE__ */ new Set();
     let pendingTicks = [];
     let ws = null;
@@ -1125,7 +1126,11 @@ var moduNetwork = (() => {
             bytesOut += msg.length;
             ws.send(msg);
             console.log("[modu-network] Requested resync from server");
-          }
+          },
+          // Callbacks that can be set by the game engine
+          onReliabilityUpdate: void 0,
+          onMajorityHash: void 0,
+          onResyncSnapshot: void 0
         };
         ws.onopen = () => {
           bandwidthInterval = setInterval(() => {
@@ -1229,7 +1234,8 @@ var moduNetwork = (() => {
               break;
             }
             case "INITIAL_STATE": {
-              console.log("[modu-network] Received INITIAL_STATE, connecting...");
+              const isResync = initialConnectionComplete;
+              console.log(`[modu-network] Received INITIAL_STATE, ${isResync ? "RESYNC" : "connecting"}...`);
               const { snapshot, frame, snapshotHash } = msg;
               if (snapshot && snapshotHash) {
                 snapshot.snapshotHash = snapshotHash;
@@ -1245,25 +1251,41 @@ var moduNetwork = (() => {
               if (inputs && inputs.length > 0) {
                 processInputsForClientIds(inputs);
               }
-              connected = true;
-              clearConnectionTimeout();
-              onConnect(snapshot, inputs || [], frame, nodeUrl, tickRate, myClientId);
-              if (pendingTicks.length > 0) {
-                pendingTicks.sort((a, b) => a.frame - b.frame);
-                for (const tickMsg of pendingTicks) {
-                  const tickInputs = (tickMsg.inputs || tickMsg.events || []).filter((e2) => !deliveredSeqs.has(e2.seq));
-                  tickInputs.forEach((e2) => deliveredSeqs.add(e2.seq));
-                  if (tickInputs.length > 0) {
-                    processInputsForClientIds(tickInputs);
-                  }
-                  for (const inp of tickInputs) {
-                    reResolveClientId(inp);
-                  }
-                  if (onTick && (tickInputs.length > 0 || tickMsg.frame > frame)) {
-                    onTick(tickMsg.frame, tickInputs, tickMsg.snapshotFrame, tickMsg.snapshotHash, tickMsg.majorityHash);
-                  }
+              if (isResync) {
+                if (instance.onResyncSnapshot && msg.binaryData) {
+                  console.log(`[modu-network] Calling onResyncSnapshot with ${msg.binaryData.length} bytes, frame=${frame}`);
+                  instance.onResyncSnapshot(msg.binaryData, frame);
+                } else if (instance.onResyncSnapshot && snapshot) {
+                  const snapshotJson = JSON.stringify({ snapshot, snapshotHash });
+                  const encoder = new TextEncoder();
+                  const binaryData = encoder.encode(snapshotJson);
+                  console.log(`[modu-network] Calling onResyncSnapshot with JSON snapshot (${binaryData.length} bytes), frame=${frame}`);
+                  instance.onResyncSnapshot(binaryData, frame);
+                } else {
+                  console.warn("[modu-network] RESYNC received but no onResyncSnapshot callback registered!");
                 }
-                pendingTicks = [];
+              } else {
+                connected = true;
+                initialConnectionComplete = true;
+                clearConnectionTimeout();
+                onConnect(snapshot, inputs || [], frame, nodeUrl, tickRate, myClientId);
+                if (pendingTicks.length > 0) {
+                  pendingTicks.sort((a, b) => a.frame - b.frame);
+                  for (const tickMsg of pendingTicks) {
+                    const tickInputs = (tickMsg.inputs || tickMsg.events || []).filter((e2) => !deliveredSeqs.has(e2.seq));
+                    tickInputs.forEach((e2) => deliveredSeqs.add(e2.seq));
+                    if (tickInputs.length > 0) {
+                      processInputsForClientIds(tickInputs);
+                    }
+                    for (const inp of tickInputs) {
+                      reResolveClientId(inp);
+                    }
+                    if (onTick && (tickInputs.length > 0 || tickMsg.frame > frame)) {
+                      onTick(tickMsg.frame, tickInputs, tickMsg.snapshotFrame, tickMsg.snapshotHash, tickMsg.majorityHash);
+                    }
+                  }
+                  pendingTicks = [];
+                }
               }
               if (connectionResolve) connectionResolve(instance);
               break;
@@ -5445,17 +5467,17 @@ var Modu = (() => {
         const connectDuration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - connectStartTime;
         console.log(`[ecs] Connected successfully in ${connectDuration.toFixed(0)}ms, clientId: ${this.connection.clientId}`);
         this.localClientIdStr = this.connection.clientId;
-        if (this.connection.onReliabilityUpdate !== void 0) {
+        if ("onReliabilityUpdate" in this.connection) {
           this.connection.onReliabilityUpdate = (scores, version) => {
             this.handleReliabilityUpdate(scores, version);
           };
         }
-        if (this.connection.onMajorityHash !== void 0) {
+        if ("onMajorityHash" in this.connection) {
           this.connection.onMajorityHash = (frame, hash) => {
             this.handleMajorityHash(frame, hash);
           };
         }
-        if (this.connection.onResyncSnapshot !== void 0) {
+        if ("onResyncSnapshot" in this.connection) {
           this.connection.onResyncSnapshot = (data, frame) => {
             this.handleResyncSnapshot(data, frame);
           };
@@ -7507,7 +7529,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "cdb32e0";
+  var ENGINE_VERSION = "b07b866";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;

@@ -3959,17 +3959,17 @@ var Game = class {
       const connectDuration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - connectStartTime;
       console.log(`[ecs] Connected successfully in ${connectDuration.toFixed(0)}ms, clientId: ${this.connection.clientId}`);
       this.localClientIdStr = this.connection.clientId;
-      if (this.connection.onReliabilityUpdate !== void 0) {
+      if ("onReliabilityUpdate" in this.connection) {
         this.connection.onReliabilityUpdate = (scores, version) => {
           this.handleReliabilityUpdate(scores, version);
         };
       }
-      if (this.connection.onMajorityHash !== void 0) {
+      if ("onMajorityHash" in this.connection) {
         this.connection.onMajorityHash = (frame, hash) => {
           this.handleMajorityHash(frame, hash);
         };
       }
-      if (this.connection.onResyncSnapshot !== void 0) {
+      if ("onResyncSnapshot" in this.connection) {
         this.connection.onResyncSnapshot = (data, frame) => {
           this.handleResyncSnapshot(data, frame);
         };
@@ -6021,7 +6021,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "cdb32e0";
+var ENGINE_VERSION = "b07b866";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;
@@ -8965,4 +8965,4 @@ export {
   xxhash32Combine,
   xxhash32String
 };
-//# sourceMappingURL=index-7MFMEPBH.js.map
+//# sourceMappingURL=index-NOLL5JPZ.js.map
