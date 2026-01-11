@@ -880,6 +880,10 @@ export class Game {
         try {
             const decoded = decode(data);
             snapshot = decoded?.snapshot;
+            // Also restore hash from binary if available
+            if (snapshot && decoded?.hash !== undefined) {
+                snapshot.hash = decoded.hash;
+            }
         } catch (e) {
             // Binary decode failed, will try JSON below
         }
@@ -890,9 +894,40 @@ export class Game {
             try {
                 const jsonStr = new TextDecoder().decode(data);
                 const parsed = JSON.parse(jsonStr);
-                snapshot = parsed?.snapshot;
-                if (snapshot) {
-                    console.log(`[state-sync] Decoded resync snapshot from JSON format`);
+
+                // The SDK might send the snapshot in different formats:
+                // 1. { snapshot: {...} } - wrapped format with actual snapshot object
+                // 2. { snapshot: [binary array], snapshotHash: ... } - binary data as array
+                // 3. Direct snapshot object
+                let rawSnapshot = parsed?.snapshot;
+
+                // Check if rawSnapshot is binary data encoded as array (has numeric keys like 0, 1, 2...)
+                // The SDK stores binary MessagePack data which becomes a JSON object with numeric keys
+                if (rawSnapshot && typeof rawSnapshot === 'object' && !rawSnapshot.types && !rawSnapshot.entities) {
+                    const keys = Object.keys(rawSnapshot);
+                    if (keys.length > 0 && keys[0] === '0') {
+                        // It's binary data as a JSON object with numeric keys - convert and decode
+                        const binaryData = new Uint8Array(Object.values(rawSnapshot) as number[]);
+                        try {
+                            const decoded = decode(binaryData);
+                            snapshot = decoded?.snapshot;
+                            // Also get the hash from the decoded binary (it was encoded with the snapshot)
+                            if (snapshot && decoded?.hash !== undefined) {
+                                snapshot.hash = decoded.hash;
+                            }
+                        } catch (e) {
+                            // Failed to decode binary from JSON wrapper
+                        }
+                    }
+                }
+
+                if (!snapshot) {
+                    snapshot = rawSnapshot;
+                }
+
+                if (!snapshot && parsed?.types && parsed?.entities) {
+                    // Direct snapshot format (not wrapped)
+                    snapshot = parsed;
                 }
             } catch (e) {
                 // JSON parse also failed
@@ -935,13 +970,13 @@ export class Game {
         // Verify resync worked
         const newLocalHash = this.world.getStateHash();
         const serverHash = snapshot.hash;
-        if (newLocalHash === serverHash) {
-            console.log(`[state-sync] Hard recovery successful - hashes now match`);
-            console.log(`  New local hash: ${newLocalHash.toString(16).padStart(8, '0')}`);
+        if (serverHash && newLocalHash === serverHash) {
+            console.log(`[state-sync] Hard recovery successful - hash=${newLocalHash.toString(16).padStart(8, '0')}`);
+        } else if (!serverHash) {
+            // No server hash in snapshot - this is OK, we can't verify but state was loaded
+            console.log(`[state-sync] Hard recovery completed - hash=${newLocalHash.toString(16).padStart(8, '0')}`);
         } else {
-            console.error(`[state-sync] Hard recovery may have issues - hash mismatch after resync!`);
-            console.error(`  Expected: ${serverHash?.toString(16).padStart(8, '0')}`);
-            console.error(`  Got:      ${newLocalHash.toString(16).padStart(8, '0')}`);
+            console.error(`[state-sync] Hard recovery hash mismatch: expected=${serverHash?.toString(16).padStart(8, '0')} got=${newLocalHash.toString(16).padStart(8, '0')}`);
         }
 
         // CRITICAL: Set prevSnapshot so delta computation has valid baseline after resync

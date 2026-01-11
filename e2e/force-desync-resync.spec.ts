@@ -31,7 +31,10 @@ test.describe('Force Desync and Resync Test', () => {
         const page1 = await context1.newPage();
         const page2 = await context2.newPage();
 
-        // Track events
+        // Track events on BOTH pages (with 2 clients, either could detect desync)
+        let resyncRequested1 = false;
+        let resyncSnapshotReceived1 = false;
+        let desyncDetected1 = false;
         let resyncRequested2 = false;
         let resyncSnapshotReceived2 = false;
         let desyncDetected2 = false;
@@ -41,6 +44,11 @@ test.describe('Force Desync and Resync Test', () => {
                 const text = msg.text();
                 if (text.includes('state-sync') || text.includes('DESYNC') || text.includes('resync') || text.includes('majorityHash')) {
                     console.log(`[${name}]`, text);
+                }
+                if (name === 'PAGE1') {
+                    if (text.includes('Requested resync')) resyncRequested1 = true;
+                    if (text.includes('Calling onResyncSnapshot')) resyncSnapshotReceived1 = true;
+                    if (text.includes('DESYNC DETECTED')) desyncDetected1 = true;
                 }
                 if (name === 'PAGE2') {
                     if (text.includes('Requested resync')) resyncRequested2 = true;
@@ -134,8 +142,10 @@ test.describe('Force Desync and Resync Test', () => {
         state1 = await getState(page1);
         state2 = await getState(page2);
         console.log(`After forced desync: Page1 hash=${state1?.hashHex} entities=${state1?.entityCount}, Page2 hash=${state2?.hashHex} entities=${state2?.entityCount}`);
+        console.log(`Page1 desync state: isDesynced=${state1?.isDesynced} resyncPending=${state1?.resyncPending}`);
         console.log(`Page2 desync state: isDesynced=${state2?.isDesynced} resyncPending=${state2?.resyncPending}`);
-        console.log(`Events: desyncDetected2=${desyncDetected2} resyncRequested2=${resyncRequested2} resyncSnapshotReceived2=${resyncSnapshotReceived2}`);
+        console.log(`Page1 events: desyncDetected=${desyncDetected1} resyncRequested=${resyncRequested1} resyncSnapshotReceived=${resyncSnapshotReceived1}`);
+        console.log(`Page2 events: desyncDetected=${desyncDetected2} resyncRequested=${resyncRequested2} resyncSnapshotReceived=${resyncSnapshotReceived2}`);
 
         // ========================================
         // PHASE 4: Wait for recovery
@@ -157,17 +167,25 @@ test.describe('Force Desync and Resync Test', () => {
         // ========================================
         console.log('\n=== Assertions ===');
 
-        // 1. Desync should have been detected
-        console.log(`Assertion: desyncDetected2=${desyncDetected2}`);
-        expect(desyncDetected2).toBe(true);
+        // With 2 clients and conflicting hashes, the majority hash tiebreaker
+        // can pick either hash, so EITHER client could detect desync.
+        // We test that the resync mechanism works regardless of which client detects it.
 
-        // 2. Resync should have been requested
-        console.log(`Assertion: resyncRequested2=${resyncRequested2}`);
-        expect(resyncRequested2).toBe(true);
+        const anyDesyncDetected = desyncDetected1 || desyncDetected2;
+        const anyResyncRequested = resyncRequested1 || resyncRequested2;
+        const anyResyncSnapshotReceived = resyncSnapshotReceived1 || resyncSnapshotReceived2;
 
-        // 3. Resync snapshot callback should have been called
-        console.log(`Assertion: resyncSnapshotReceived2=${resyncSnapshotReceived2}`);
-        expect(resyncSnapshotReceived2).toBe(true);
+        // 1. Desync should have been detected by at least one client
+        console.log(`Assertion: anyDesyncDetected=${anyDesyncDetected} (page1=${desyncDetected1}, page2=${desyncDetected2})`);
+        expect(anyDesyncDetected).toBe(true);
+
+        // 2. Resync should have been requested by at least one client
+        console.log(`Assertion: anyResyncRequested=${anyResyncRequested} (page1=${resyncRequested1}, page2=${resyncRequested2})`);
+        expect(anyResyncRequested).toBe(true);
+
+        // 3. Resync snapshot callback should have been called for at least one client
+        console.log(`Assertion: anyResyncSnapshotReceived=${anyResyncSnapshotReceived} (page1=${resyncSnapshotReceived1}, page2=${resyncSnapshotReceived2})`);
+        expect(anyResyncSnapshotReceived).toBe(true);
 
         // 4. After recovery, states should match
         // Allow some tolerance for frame timing
@@ -177,7 +195,8 @@ test.describe('Force Desync and Resync Test', () => {
             expect(entityDiff).toBeLessThanOrEqual(2);
         }
 
-        // 5. Page2 should not be stuck in resync
+        // 5. Neither client should be stuck in resync
+        expect(state1?.resyncPending).toBeFalsy();
         expect(state2?.resyncPending).toBeFalsy();
 
         await context1.close();

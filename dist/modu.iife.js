@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-11T21:02:00.059Z - Commit: 2316147 */
+/* Modu Engine - Built: 2026-01-11T21:53:04.537Z - Commit: 61e8993 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -5550,15 +5550,35 @@ var Modu = (() => {
       try {
         const decoded = decode(data);
         snapshot = decoded?.snapshot;
+        if (snapshot && decoded?.hash !== void 0) {
+          snapshot.hash = decoded.hash;
+        }
       } catch (e) {
       }
       if (!snapshot) {
         try {
           const jsonStr = new TextDecoder().decode(data);
           const parsed = JSON.parse(jsonStr);
-          snapshot = parsed?.snapshot;
-          if (snapshot) {
-            console.log(`[state-sync] Decoded resync snapshot from JSON format`);
+          let rawSnapshot = parsed?.snapshot;
+          if (rawSnapshot && typeof rawSnapshot === "object" && !rawSnapshot.types && !rawSnapshot.entities) {
+            const keys = Object.keys(rawSnapshot);
+            if (keys.length > 0 && keys[0] === "0") {
+              const binaryData = new Uint8Array(Object.values(rawSnapshot));
+              try {
+                const decoded = decode(binaryData);
+                snapshot = decoded?.snapshot;
+                if (snapshot && decoded?.hash !== void 0) {
+                  snapshot.hash = decoded.hash;
+                }
+              } catch (e) {
+              }
+            }
+          }
+          if (!snapshot) {
+            snapshot = rawSnapshot;
+          }
+          if (!snapshot && parsed?.types && parsed?.entities) {
+            snapshot = parsed;
           }
         } catch (e) {
         }
@@ -5582,13 +5602,12 @@ var Modu = (() => {
       this.isDesynced = false;
       const newLocalHash = this.world.getStateHash();
       const serverHash = snapshot.hash;
-      if (newLocalHash === serverHash) {
-        console.log(`[state-sync] Hard recovery successful - hashes now match`);
-        console.log(`  New local hash: ${newLocalHash.toString(16).padStart(8, "0")}`);
+      if (serverHash && newLocalHash === serverHash) {
+        console.log(`[state-sync] Hard recovery successful - hash=${newLocalHash.toString(16).padStart(8, "0")}`);
+      } else if (!serverHash) {
+        console.log(`[state-sync] Hard recovery completed - hash=${newLocalHash.toString(16).padStart(8, "0")}`);
       } else {
-        console.error(`[state-sync] Hard recovery may have issues - hash mismatch after resync!`);
-        console.error(`  Expected: ${serverHash?.toString(16).padStart(8, "0")}`);
-        console.error(`  Got:      ${newLocalHash.toString(16).padStart(8, "0")}`);
+        console.error(`[state-sync] Hard recovery hash mismatch: expected=${serverHash?.toString(16).padStart(8, "0")} got=${newLocalHash.toString(16).padStart(8, "0")}`);
       }
       this.prevSnapshot = this.world.getSparseSnapshot();
       this.stateHashHistory.clear();
@@ -7537,7 +7556,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "2316147";
+  var ENGINE_VERSION = "61e8993";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
