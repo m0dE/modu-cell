@@ -4082,6 +4082,7 @@ var Game = class {
       frame: serverFrame,
       hash: newLocalHash
     };
+    this.clientsWithEntitiesFromSnapshot.clear();
     console.log(`[state-sync] === END RESYNC ===`);
   }
   /**
@@ -6013,7 +6014,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "9c49de7";
+var ENGINE_VERSION = "b0ef19f";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;

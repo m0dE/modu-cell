@@ -4228,6 +4228,7 @@ var Modu = (() => {
         frame: serverFrame,
         hash: newLocalHash
       };
+      this.clientsWithEntitiesFromSnapshot.clear();
       console.log(`[state-sync] === END RESYNC ===`);
     }
     /**
@@ -6159,7 +6160,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "9c49de7";
+  var ENGINE_VERSION = "b0ef19f";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
@@ -8976,4 +8977,4 @@ var Modu = (() => {
   }
   return __toCommonJS(src_exports);
 })();
-//# sourceMappingURL=index.iife-XDED3MBZ.js.map
+//# sourceMappingURL=index.iife-Y43NKVZS.js.map

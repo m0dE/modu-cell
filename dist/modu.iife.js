@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-11T07:14:42.318Z - Commit: 9c49de7 */
+/* Modu Engine - Built: 2026-01-11T07:41:29.983Z - Commit: b0ef19f */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -5568,6 +5568,7 @@ var Modu = (() => {
         frame: serverFrame,
         hash: newLocalHash
       };
+      this.clientsWithEntitiesFromSnapshot.clear();
       console.log(`[state-sync] === END RESYNC ===`);
     }
     /**
@@ -7499,7 +7500,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "9c49de7";
+  var ENGINE_VERSION = "b0ef19f";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;

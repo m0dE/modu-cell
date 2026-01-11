@@ -945,6 +945,12 @@ export class Game {
             hash: newLocalHash
         };
 
+        // CRITICAL: Clear clientsWithEntitiesFromSnapshot after resync
+        // loadNetworkSnapshot populates this set, but we're not doing catchup here.
+        // If left populated, future join events would incorrectly skip onConnect
+        // for clients whose entities are in this stale set.
+        this.clientsWithEntitiesFromSnapshot.clear();
+
         console.log(`[state-sync] === END RESYNC ===`);
     }
 
