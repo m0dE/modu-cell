@@ -4188,13 +4188,21 @@ var Modu = (() => {
       try {
         const decoded = decode(data);
         snapshot = decoded?.snapshot;
-        if (!snapshot) {
-          console.error(`[state-sync] Failed to decode resync snapshot - no snapshot data`);
-          this.resyncPending = false;
-          return;
-        }
       } catch (e) {
-        console.error(`[state-sync] Failed to decode resync snapshot:`, e);
+      }
+      if (!snapshot) {
+        try {
+          const jsonStr = new TextDecoder().decode(data);
+          const parsed = JSON.parse(jsonStr);
+          snapshot = parsed?.snapshot;
+          if (snapshot) {
+            console.log(`[state-sync] Decoded resync snapshot from JSON format`);
+          }
+        } catch (e) {
+        }
+      }
+      if (!snapshot) {
+        console.error(`[state-sync] Failed to decode resync snapshot - no snapshot data (tried binary and JSON)`);
         this.resyncPending = false;
         return;
       }
@@ -6167,7 +6175,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "b07b866";
+  var ENGINE_VERSION = "2316147";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
@@ -8984,4 +8992,4 @@ var Modu = (() => {
   }
   return __toCommonJS(src_exports);
 })();
-//# sourceMappingURL=index.iife-7OXFP4WU.js.map
+//# sourceMappingURL=index.iife-YEIBRW6K.js.map

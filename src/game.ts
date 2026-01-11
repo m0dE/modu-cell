@@ -875,18 +875,32 @@ export class Game {
     private handleResyncSnapshot(data: Uint8Array, serverFrame: number): void {
         console.log(`[state-sync] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}`);
 
-        // Decode the snapshot
+        // Decode the snapshot - try binary format first, then JSON fallback
         let snapshot: any;
         try {
             const decoded = decode(data);
             snapshot = decoded?.snapshot;
-            if (!snapshot) {
-                console.error(`[state-sync] Failed to decode resync snapshot - no snapshot data`);
-                this.resyncPending = false;
-                return;
-            }
         } catch (e) {
-            console.error(`[state-sync] Failed to decode resync snapshot:`, e);
+            // Binary decode failed, will try JSON below
+        }
+
+        // If binary decode didn't get a snapshot, try JSON format
+        // (SDK may send JSON-encoded snapshot for resync)
+        if (!snapshot) {
+            try {
+                const jsonStr = new TextDecoder().decode(data);
+                const parsed = JSON.parse(jsonStr);
+                snapshot = parsed?.snapshot;
+                if (snapshot) {
+                    console.log(`[state-sync] Decoded resync snapshot from JSON format`);
+                }
+            } catch (e) {
+                // JSON parse also failed
+            }
+        }
+
+        if (!snapshot) {
+            console.error(`[state-sync] Failed to decode resync snapshot - no snapshot data (tried binary and JSON)`);
             this.resyncPending = false;
             return;
         }
