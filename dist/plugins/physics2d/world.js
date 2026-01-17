@@ -49,8 +49,14 @@ export function stepWorld2D(world) {
     const triggerOverlaps = [];
     // Collect collision pairs for deterministic callback firing AFTER detection
     const collisionPairs = [];
-    // Sort bodies by label for deterministic collision processing
-    const bodies = [...world.bodies].sort((a, b) => a.label.localeCompare(b.label));
+    // Sort bodies by label (eid) NUMERICALLY for deterministic collision processing
+    // CRITICAL: Labels are eid.toString(), so we must parse them as numbers!
+    // localeCompare would sort "1", "10", "2" instead of 1, 2, 10
+    const bodies = [...world.bodies].sort((a, b) => {
+        const eidA = parseInt(a.label, 10) || 0;
+        const eidB = parseInt(b.label, 10) || 0;
+        return eidA - eidB;
+    });
     // Integrate velocities (apply gravity)
     for (const body of bodies) {
         if (body.type !== BodyType2D.Dynamic)
@@ -69,7 +75,13 @@ export function stepWorld2D(world) {
     // Cell size should be >= largest entity diameter for optimal performance
     const spatialHash = new SpatialHash2D(DEFAULT_CELL_SIZE);
     spatialHash.insertAll(bodies);
-    // Process potential collision pairs directly (no intermediate array allocation)
+    // CRITICAL: Collect ALL contacts first, then sort and resolve in deterministic order.
+    // The spatial hash forEachPair iterates in Map insertion order, which can differ
+    // between authority (bodies added over time) and late joiners (bodies added sorted).
+    // If we resolve collisions inside the callback, resolution order is non-deterministic,
+    // causing simulation divergence.
+    const pendingContacts = [];
+    // Process potential collision pairs - DETECT only, don't resolve yet
     spatialHash.forEachPair((bodyA, bodyB) => {
         // Skip static-static (no collision needed)
         if (bodyA.type === BodyType2D.Static && bodyB.type === BodyType2D.Static)
@@ -85,15 +97,22 @@ export function stepWorld2D(world) {
         const contact = detectCollision2D(bodyA, bodyB);
         if (!contact)
             return;
+        // CRITICAL: Normalize pair order so smaller label (eid) is always first.
+        // Without this, spatial hash iteration order determines (A,B) vs (B,A),
+        // causing different sort results between authority and late joiner.
+        // Use numeric comparison since labels are eid.toString()
+        const eidA = parseInt(bodyA.label, 10) || 0;
+        const eidB = parseInt(bodyB.label, 10) || 0;
+        const shouldSwap = eidA > eidB;
         // Collect entity pairs for callback firing (all collisions including sensors)
         const entityA = bodyA.userData;
         const entityB = bodyB.userData;
         if (entityA || entityB) {
             collisionPairs.push({
-                entityA,
-                entityB,
-                labelA: bodyA.label,
-                labelB: bodyB.label
+                entityA: shouldSwap ? entityB : entityA,
+                entityB: shouldSwap ? entityA : entityB,
+                labelA: shouldSwap ? bodyB.label : bodyA.label,
+                labelB: shouldSwap ? bodyA.label : bodyB.label
             });
         }
         // Sensors: detect overlap but skip physics response
@@ -104,18 +123,42 @@ export function stepWorld2D(world) {
                 triggerOverlaps.push({ trigger: bodyB, other: bodyA });
             return;
         }
-        // Store contact and fire contact listener
+        // Store contact for later resolution (don't resolve inside callback!)
+        // Use normalized labels (smaller first) for deterministic sorting
+        const normLabelA = shouldSwap ? bodyB.label : bodyA.label;
+        const normLabelB = shouldSwap ? bodyA.label : bodyB.label;
+        pendingContacts.push({ contact, labelA: normLabelA, labelB: normLabelB });
         contacts.push(contact);
-        if (world.contactListener)
-            world.contactListener.onContact(bodyA, bodyB);
-        // Resolve collision (position + velocity)
-        resolveCollision2D(contact);
+        // NOTE: contactListener.onContact was removed here - it was firing collision handlers
+        // in non-deterministic (spatial hash iteration) order, causing multiplayer desync.
+        // Collision handlers are now called only via collisionPairs (sorted) below.
     });
+    // CRITICAL: Sort contacts by body labels (eids) NUMERICALLY for deterministic resolution order
+    pendingContacts.sort((a, b) => {
+        const eidA1 = parseInt(a.labelA, 10) || 0;
+        const eidB1 = parseInt(b.labelA, 10) || 0;
+        const cmp = eidA1 - eidB1;
+        if (cmp !== 0)
+            return cmp;
+        const eidA2 = parseInt(a.labelB, 10) || 0;
+        const eidB2 = parseInt(b.labelB, 10) || 0;
+        return eidA2 - eidB2;
+    });
+    // Now resolve all collisions in sorted order
+    for (const { contact } of pendingContacts) {
+        resolveCollision2D(contact);
+    }
     // Fire entity collision callbacks AFTER all detection is complete
-    // Sort by both labels to ensure deterministic ordering across clients
+    // Sort by both labels (eids) NUMERICALLY to ensure deterministic ordering across clients
     collisionPairs.sort((a, b) => {
-        const cmp = a.labelA.localeCompare(b.labelA);
-        return cmp !== 0 ? cmp : a.labelB.localeCompare(b.labelB);
+        const eidA1 = parseInt(a.labelA, 10) || 0;
+        const eidB1 = parseInt(b.labelA, 10) || 0;
+        const cmp = eidA1 - eidB1;
+        if (cmp !== 0)
+            return cmp;
+        const eidA2 = parseInt(a.labelB, 10) || 0;
+        const eidB2 = parseInt(b.labelB, 10) || 0;
+        return eidA2 - eidB2;
     });
     for (const pair of collisionPairs) {
         // Check active status at callback time (may have changed during earlier callbacks)
@@ -345,8 +388,12 @@ function createBodyFromState(bs) {
  * so bodies can be fully recreated without any prior state.
  */
 export function loadWorldState2D(world, state) {
-    // Sort snapshot bodies by label for deterministic iteration
-    const sortedBodies = [...state.bodies].sort((a, b) => a.label.localeCompare(b.label));
+    // Sort snapshot bodies by label (eid) NUMERICALLY for deterministic iteration
+    const sortedBodies = [...state.bodies].sort((a, b) => {
+        const eidA = parseInt(a.label, 10) || 0;
+        const eidB = parseInt(b.label, 10) || 0;
+        return eidA - eidB;
+    });
     // Build a set of labels in the snapshot
     const snapshotLabels = new Set(sortedBodies.map(bs => bs.label));
     // Remove bodies not in snapshot
@@ -392,6 +439,10 @@ export function loadWorldState2D(world, state) {
     if (maxId >= currentCounter) {
         setBody2DIdCounter(maxId + 1);
     }
-    // Sort world bodies by label for deterministic order
-    world.bodies.sort((a, b) => a.label.localeCompare(b.label));
+    // Sort world bodies by label (eid) NUMERICALLY for deterministic order
+    world.bodies.sort((a, b) => {
+        const eidA = parseInt(a.label, 10) || 0;
+        const eidB = parseInt(b.label, 10) || 0;
+        return eidA - eidB;
+    });
 }

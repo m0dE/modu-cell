@@ -45,8 +45,15 @@ export class TriggerState<T extends TriggerBody = TriggerBody> {
 
     processOverlaps(currentOverlaps: TriggerEvent<T>[]): void {
         const currentKeys = new Set<string>();
+        // Sort by trigger and other labels (eids) NUMERICALLY for determinism
         const sortedOverlaps = [...currentOverlaps].sort((a, b) => {
-            return this.makeKey(a.trigger, a.other).localeCompare(this.makeKey(b.trigger, b.other));
+            const eidTriggerA = parseInt(a.trigger.label, 10) || 0;
+            const eidTriggerB = parseInt(b.trigger.label, 10) || 0;
+            const cmp = eidTriggerA - eidTriggerB;
+            if (cmp !== 0) return cmp;
+            const eidOtherA = parseInt(a.other.label, 10) || 0;
+            const eidOtherB = parseInt(b.other.label, 10) || 0;
+            return eidOtherA - eidOtherB;
         });
 
         for (const overlap of sortedOverlaps) {
@@ -97,7 +104,12 @@ export class TriggerState<T extends TriggerBody = TriggerBody> {
                 bodies.push(overlap.other);
             }
         }
-        return bodies.sort((a, b) => a.label.localeCompare(b.label));
+        // Sort by label (eid) NUMERICALLY for determinism
+        return bodies.sort((a, b) => {
+            const eidA = parseInt(a.label, 10) || 0;
+            const eidB = parseInt(b.label, 10) || 0;
+            return eidA - eidB;
+        });
     }
 
     isBodyInTrigger(trigger: T, body: T): boolean {
@@ -113,7 +125,16 @@ export class TriggerState<T extends TriggerBody = TriggerBody> {
         for (const overlap of this.overlaps.values()) {
             pairs.push([overlap.trigger.label, overlap.other.label]);
         }
-        return pairs.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+        // Sort by labels (eids) NUMERICALLY for determinism
+        return pairs.sort((a, b) => {
+            const eid1A = parseInt(a[0], 10) || 0;
+            const eid1B = parseInt(b[0], 10) || 0;
+            const cmp = eid1A - eid1B;
+            if (cmp !== 0) return cmp;
+            const eid2A = parseInt(a[1], 10) || 0;
+            const eid2B = parseInt(b[1], 10) || 0;
+            return eid2A - eid2B;
+        });
     }
 
     private pendingPairs: [string, string][] = [];

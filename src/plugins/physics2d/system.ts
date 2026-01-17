@@ -450,6 +450,7 @@ export class Physics2DSystem {
      * Used during snapshot restoration to ensure fresh physics state.
      */
     clear(): void {
+        const bodyCount = this.entityToBody.size;
         for (const body of this.entityToBody.values()) {
             removeBody2D(this.physicsWorld, body);
         }
@@ -460,6 +461,7 @@ export class Physics2DSystem {
         // Without this, recreated bodies would have different IDs than the original,
         // potentially causing collision order differences and simulation divergence
         resetBody2DIdCounter();
+        console.log(`[PHYSICS-CLEAR] Cleared ${bodyCount} bodies`);
     }
 
     /**
@@ -494,19 +496,27 @@ export class Physics2DSystem {
         // CRITICAL: Sort by entity ID to ensure deterministic body creation order
         // Without sorting, iteration order may differ between room creator and late joiners
         const entitiesWithBody2D = [...this.world.query(Body2D)].sort((a, b) => a.eid - b.eid);
+        const bodiesExistedBefore = this.entityToBody.size;
         if (this.entityToBody.size === 0 && entitiesWithBody2D.length > 0) {
+            console.log(`[PHYSICS-SYNC] Creating ${entitiesWithBody2D.length} bodies from scratch`);
             for (const entity of entitiesWithBody2D) {
                 this.ensureBody(entity);
             }
         }
 
         // Now sync all bodies
+        let syncedCount = 0;
         for (const [eid, body] of this.entityToBody) {
             const entity = this.world.getEntity(eid);
             if (!entity || entity.destroyed) continue;
 
             const transform = entity.get(Transform2D);
             const bodyData = entity.get(Body2D);
+
+            // Log first few bodies for debugging
+            if (syncedCount < 3) {
+                console.log(`[PHYSICS-SYNC] Body ${eid}: pos(${transform.x.toFixed(1)},${transform.y.toFixed(1)}) -> physics`);
+            }
 
             // Sync position and angle from Transform2D
             body.position.x = toFixed(transform.x);
@@ -521,7 +531,10 @@ export class Physics2DSystem {
             // Wake the body to ensure it's active
             body.isSleeping = false;
             body.sleepFrames = 0;
+            syncedCount++;
         }
+
+        console.log(`[PHYSICS-SYNC] Synced ${syncedCount} bodies (existed before: ${bodiesExistedBefore})`);
     }
 }
 

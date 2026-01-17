@@ -100,6 +100,7 @@ export declare class Game {
     private lastSnapshotFrame;
     private lastSnapshotSize;
     private lastSnapshotEntityCount;
+    private snapshotLoadedFrame;
     /** Drift tracking stats for debug UI */
     private driftStats;
     /** Divergence tracking */

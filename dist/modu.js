@@ -3533,6 +3533,8 @@ var Game = class {
     this.lastSnapshotFrame = 0;
     this.lastSnapshotSize = 0;
     this.lastSnapshotEntityCount = 0;
+    this.snapshotLoadedFrame = 0;
+    // Frame when snapshot was loaded (for debug timing)
     /** Drift tracking stats for debug UI */
     this.driftStats = {
       determinismPercent: 100,
@@ -4007,9 +4009,6 @@ var Game = class {
    */
   handleMajorityHash(frame, majorityHash) {
     const localHash = this.stateHashHistory.get(frame);
-    if (frame % 100 === 0) {
-      console.log(`[state-sync] frame=${frame} localHash=${localHash?.toString(16) ?? "none"} majorityHash=${majorityHash.toString(16)}`);
-    }
     if (localHash === void 0) {
       if (frame % 100 === 0) {
         console.warn(`[state-sync] No local hash for frame ${frame} (history has ${this.stateHashHistory.size} frames)`);
@@ -4309,7 +4308,11 @@ var Game = class {
         snapshot = null;
       } else {
         try {
-          snapshot = decode(snapshot)?.snapshot || null;
+          const decoded = decode(snapshot);
+          snapshot = decoded?.snapshot || null;
+          if (snapshot && decoded?.hash !== void 0) {
+            snapshot.hash = decoded.hash;
+          }
         } catch (e) {
           console.error("[ecs] Failed to decode snapshot:", e);
           snapshot = null;
@@ -4333,10 +4336,30 @@ var Game = class {
     }
     const hasValidSnapshot = snapshot?.entities && snapshot.entities.length > 0;
     if (hasValidSnapshot) {
-      if (DEBUG_NETWORK)
-        console.log(`[ecs] Late join: restoring snapshot frame=${snapshot.frame}`);
+      console.log(`[LATE JOIN] Restoring snapshot: frame=${snapshot.frame}, entities=${snapshot.entities.length}, serverFrame=${frame}`);
+      let joinCount = 0;
+      for (const input of inputs) {
+        let data = input.data;
+        if (data instanceof Uint8Array) {
+          try {
+            data = decode(data);
+          } catch {
+            continue;
+          }
+        }
+        const inputClientId = data?.clientId || input.clientId;
+        if (inputClientId && (data?.type === "join" || data?.type === "reconnect")) {
+          this.internClientId(inputClientId);
+          joinCount++;
+        }
+      }
       this.currentFrame = snapshot.frame || frame;
       this.loadNetworkSnapshot(snapshot);
+      const loadedHash = this.world.getStateHash();
+      const expectedHash = snapshot.hash;
+      if (expectedHash !== void 0 && loadedHash !== expectedHash) {
+        console.error(`[SNAPSHOT] HASH MISMATCH! loaded=0x${loadedHash.toString(16)} expected=0x${expectedHash?.toString(16)}`);
+      }
       for (const input of inputs) {
         this.processAuthorityChainInput(input);
       }
@@ -4351,9 +4374,27 @@ var Game = class {
       const isPostTick = snapshot.postTick === true;
       const startFrame = isPostTick ? snapshotFrame + 1 : snapshotFrame;
       const ticksToRun = frame - startFrame + 1;
+      const MAX_CATCHUP_FRAMES = 100;
+      if (ticksToRun > MAX_CATCHUP_FRAMES) {
+        console.warn(`[CATCHUP] Skipping ${ticksToRun} frames of catchup (max=${MAX_CATCHUP_FRAMES}). Using snapshot state directly.`);
+        this.currentFrame = frame;
+        this.lastProcessedFrame = frame;
+        this.clientsWithEntitiesFromSnapshot.clear();
+        this.prevSnapshot = this.world.getSparseSnapshot();
+        this.lastGoodSnapshot = {
+          snapshot: this.prevSnapshot,
+          frame,
+          hash: this.world.getStateHash()
+        };
+        console.log(`[LATE JOIN] Skipped catchup, using snapshot at frame=${frame}, hash=0x${this.world.getStateHash().toString(16)}`);
+        return;
+      }
       if (ticksToRun > 0) {
+        console.log(`[LATE JOIN] Starting catchup: ${ticksToRun} frames, ${pendingInputs.length} inputs`);
         this.runCatchup(startFrame, frame, pendingInputs);
       }
+      console.log(`[LATE JOIN] Catchup complete: frame=${this.currentFrame} hash=0x${this.world.getStateHash().toString(16)}`);
+      this.snapshotLoadedFrame = this.currentFrame;
       this.prevSnapshot = this.world.getSparseSnapshot();
       this.lastGoodSnapshot = {
         snapshot: JSON.parse(JSON.stringify(snapshot)),
@@ -4421,6 +4462,7 @@ var Game = class {
       this.processInput(input);
     }
     this.world.tick(frame, []);
+    const hashAfter = this.world.getStateHash();
     this.callbacks.onTick?.(frame);
     if (this.pendingSnapshotUpload && this.checkIsAuthority()) {
       this.sendSnapshot("join");
@@ -4526,12 +4568,9 @@ var Game = class {
       if (this.authorityClientId === null) {
         this.authorityClientId = clientId;
       }
-      console.log(`[ecs-debug] JOIN: ${clientId.slice(0, 8)} wasActive=${wasActive} activeClients=[${this.activeClients.join(",")}]`);
-      if (DEBUG_NETWORK) {
-        console.log(`[ecs] Join: ${clientId.slice(0, 8)}, authority=${this.authorityClientId?.slice(0, 8)}`);
-      }
       const rngState = saveRandomState();
-      if (!this.clientsWithEntitiesFromSnapshot.has(clientId)) {
+      const hasEntityFromSnapshot = this.clientsWithEntitiesFromSnapshot.has(clientId);
+      if (!hasEntityFromSnapshot) {
         this.callbacks.onConnect?.(clientId);
       }
       loadRandomState(rngState);
@@ -4539,7 +4578,6 @@ var Game = class {
         this.pendingSnapshotUpload = true;
       }
     } else if (type === "resync_request") {
-      console.log(`[ecs-debug] RESYNC_REQUEST from ${clientId.slice(0, 8)}`);
       if (this.checkIsAuthority()) {
         this.pendingSnapshotUpload = true;
       }
@@ -4551,12 +4589,13 @@ var Game = class {
       if (clientId === this.authorityClientId) {
         this.authorityClientId = this.activeClients[0] || null;
       }
-      if (DEBUG_NETWORK) {
-        console.log(`[ecs] Leave: ${clientId.slice(0, 8)}, new authority=${this.authorityClientId?.slice(0, 8)}`);
-      }
+      this.clientsWithEntitiesFromSnapshot.delete(clientId);
       const rngStateDisconnect = saveRandomState();
       this.callbacks.onDisconnect?.(clientId);
       loadRandomState(rngStateDisconnect);
+      if (this.checkIsAuthority()) {
+        this.pendingSnapshotUpload = true;
+      }
     } else if (data) {
       this.routeInputToEntity(clientId, data);
     }
@@ -4609,13 +4648,13 @@ var Game = class {
    */
   runCatchup(startFrame, endFrame, inputs) {
     const ticksToRun = endFrame - startFrame + 1;
-    if (DEBUG_NETWORK) {
-      console.log(`[ecs] Catchup: ${ticksToRun} ticks from ${startFrame} to ${endFrame}, ${inputs.length} inputs`);
-    }
     const sortedInputs = [...inputs].sort((a, b) => (a.seq || 0) - (b.seq || 0));
     const inputsByFrame = /* @__PURE__ */ new Map();
     for (const input of sortedInputs) {
-      const rawFrame = input.frame ?? startFrame;
+      const rawFrame = input.frame ?? endFrame;
+      if (rawFrame > endFrame) {
+        continue;
+      }
       const frame = Math.max(rawFrame, startFrame);
       if (!inputsByFrame.has(frame)) {
         inputsByFrame.set(frame, []);
@@ -4627,19 +4666,20 @@ var Game = class {
       const tickFrame = startFrame + f;
       this.currentFrame = tickFrame;
       const frameInputs = inputsByFrame.get(tickFrame) || [];
+      const hashBeforeInputs = this.world.getStateHash();
       for (const input of frameInputs) {
         this.processInput(input);
       }
+      const hashAfterInputs = this.world.getStateHash();
       this.world.tick(tickFrame, []);
+      const hashAfterTick = this.world.getStateHash();
       this.callbacks.onTick?.(tickFrame);
-      this.stateHashHistory.set(tickFrame, this.world.getStateHash());
+      this.stateHashHistory.set(tickFrame, hashAfterTick);
     }
+    const finalHash = this.world.getStateHash();
     this.currentFrame = endFrame;
     this.lastProcessedFrame = endFrame;
     this.clientsWithEntitiesFromSnapshot.clear();
-    if (DEBUG_NETWORK) {
-      console.log(`[ecs] Catchup complete at frame ${this.currentFrame}, hash=${this.getStateHash()}`);
-    }
   }
   // ==========================================
   // Snapshot Methods
@@ -4715,6 +4755,7 @@ var Game = class {
       },
       inputState: this.world.getInputState()
     };
+    console.log(`[SNAPSHOT-CREATE] frame=${this.currentFrame} inputState:`, JSON.stringify(this.world.getInputState()));
   }
   /**
    * Load network snapshot into ECS world.
@@ -4734,9 +4775,22 @@ var Game = class {
       this.world.strings.setState(snapshot.strings);
     }
     if (snapshot.clientIdMap) {
-      this.clientIdToNum = new Map(Object.entries(snapshot.clientIdMap.toNum).map(([k, v]) => [k, v]));
-      this.numToClientId = new Map(Array.from(this.clientIdToNum.entries()).map(([k, v]) => [v, k]));
+      const snapshotMappings = Object.entries(snapshot.clientIdMap.toNum);
+      const newMappings = [];
+      for (const [clientId, num] of this.clientIdToNum.entries()) {
+        const snapshotHas = snapshotMappings.some(([sid]) => sid === clientId);
+        if (!snapshotHas) {
+          newMappings.push([clientId, num]);
+        }
+      }
+      this.clientIdToNum = new Map(snapshotMappings.map(([k, v]) => [k, v]));
+      this.numToClientId = new Map(snapshotMappings.map(([k, v]) => [v, k]));
       this.nextClientNum = snapshot.clientIdMap.nextNum || 1;
+      for (const [clientId] of newMappings) {
+        const newNum = this.nextClientNum++;
+        this.clientIdToNum.set(clientId, newNum);
+        this.numToClientId.set(newNum, clientId);
+      }
     }
     const types = snapshot.types;
     const schema = snapshot.schema;
@@ -4810,6 +4864,9 @@ var Game = class {
     const network = typeof window !== "undefined" ? window.moduNetwork : void 0;
     for (const entity of this.world.query(Player)) {
       const player = entity.get(Player);
+      if (player.clientId === 0) {
+        console.error(`[DEBUG-SNAPSHOT] ERROR: eid=${entity.eid} has Player.clientId=0 (invalid!)`);
+      }
       if (player.clientId !== 0) {
         const clientIdStr = this.getClientIdString(player.clientId);
         if (clientIdStr) {
@@ -4835,20 +4892,11 @@ var Game = class {
     }
     if (snapshot.inputState) {
       this.world.setInputState(snapshot.inputState);
-    }
-    if (DEBUG_NETWORK) {
-      console.log(`[ecs] Snapshot loaded: ${this.world.getAllEntities().length} entities, hash=${this.getStateHash()}, activeClients=${this.activeClients.length}`);
-      const firstEntity = this.world.getAllEntities()[0];
-      if (firstEntity) {
-        const components = {};
-        for (const comp of firstEntity.getComponents()) {
-          const data = {};
-          for (const fieldName of comp.fieldNames) {
-            data[fieldName] = firstEntity.get(comp)[fieldName];
-          }
-          components[comp.name] = data;
-        }
-        console.log(`[ecs] Restored first entity: type=${firstEntity.type}, components=`, JSON.stringify(components));
+      const verifyState = this.world.getInputState();
+      const snapshotKeys = Object.keys(snapshot.inputState).sort().join(",");
+      const loadedKeys = Object.keys(verifyState).sort().join(",");
+      if (snapshotKeys !== loadedKeys) {
+        console.error(`[INPUT-STATE] KEYS DIFFER! snapshot=[${snapshotKeys}] loaded=[${loadedKeys}]`);
       }
     }
   }
@@ -4865,6 +4913,8 @@ var Game = class {
     const hash = this.world.getStateHash();
     const binary = encode({ snapshot, hash });
     const entityCount = snapshot.entities.length;
+    console.log(`[SNAPSHOT-SEND] source=${source} frame=${snapshot.frame} hash=0x${hash.toString(16)} entities=${entityCount}`);
+    console.log(`[SNAPSHOT-SEND] inputState:`, JSON.stringify(snapshot.inputState || "MISSING"));
     if (DEBUG_NETWORK) {
       console.log(`[ecs] Sending snapshot (${source}): ${binary.length} bytes, ${entityCount} entities, hash=${hash}`);
     }
@@ -6096,7 +6146,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "470cff0";
+var ENGINE_VERSION = "1972fb2";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;
@@ -7041,7 +7091,11 @@ function stepWorld2D(world) {
   const contacts = [];
   const triggerOverlaps = [];
   const collisionPairs = [];
-  const bodies = [...world.bodies].sort((a, b) => a.label.localeCompare(b.label));
+  const bodies = [...world.bodies].sort((a, b) => {
+    const eidA = parseInt(a.label, 10) || 0;
+    const eidB = parseInt(b.label, 10) || 0;
+    return eidA - eidB;
+  });
   for (const body of bodies) {
     if (body.type !== 2 /* Dynamic */)
       continue;
@@ -7055,6 +7109,7 @@ function stepWorld2D(world) {
   }
   const spatialHash = new SpatialHash2D(DEFAULT_CELL_SIZE);
   spatialHash.insertAll(bodies);
+  const pendingContacts = [];
   spatialHash.forEachPair((bodyA, bodyB) => {
     if (bodyA.type === 0 /* Static */ && bodyB.type === 0 /* Static */)
       return;
@@ -7067,14 +7122,17 @@ function stepWorld2D(world) {
     const contact = detectCollision2D(bodyA, bodyB);
     if (!contact)
       return;
+    const eidA = parseInt(bodyA.label, 10) || 0;
+    const eidB = parseInt(bodyB.label, 10) || 0;
+    const shouldSwap = eidA > eidB;
     const entityA = bodyA.userData;
     const entityB = bodyB.userData;
     if (entityA || entityB) {
       collisionPairs.push({
-        entityA,
-        entityB,
-        labelA: bodyA.label,
-        labelB: bodyB.label
+        entityA: shouldSwap ? entityB : entityA,
+        entityB: shouldSwap ? entityA : entityB,
+        labelA: shouldSwap ? bodyB.label : bodyA.label,
+        labelB: shouldSwap ? bodyA.label : bodyB.label
       });
     }
     if (bodyA.isSensor || bodyB.isSensor) {
@@ -7084,14 +7142,33 @@ function stepWorld2D(world) {
         triggerOverlaps.push({ trigger: bodyB, other: bodyA });
       return;
     }
+    const normLabelA = shouldSwap ? bodyB.label : bodyA.label;
+    const normLabelB = shouldSwap ? bodyA.label : bodyB.label;
+    pendingContacts.push({ contact, labelA: normLabelA, labelB: normLabelB });
     contacts.push(contact);
-    if (world.contactListener)
-      world.contactListener.onContact(bodyA, bodyB);
-    resolveCollision2D(contact);
   });
+  pendingContacts.sort((a, b) => {
+    const eidA1 = parseInt(a.labelA, 10) || 0;
+    const eidB1 = parseInt(b.labelA, 10) || 0;
+    const cmp = eidA1 - eidB1;
+    if (cmp !== 0)
+      return cmp;
+    const eidA2 = parseInt(a.labelB, 10) || 0;
+    const eidB2 = parseInt(b.labelB, 10) || 0;
+    return eidA2 - eidB2;
+  });
+  for (const { contact } of pendingContacts) {
+    resolveCollision2D(contact);
+  }
   collisionPairs.sort((a, b) => {
-    const cmp = a.labelA.localeCompare(b.labelA);
-    return cmp !== 0 ? cmp : a.labelB.localeCompare(b.labelB);
+    const eidA1 = parseInt(a.labelA, 10) || 0;
+    const eidB1 = parseInt(b.labelA, 10) || 0;
+    const cmp = eidA1 - eidB1;
+    if (cmp !== 0)
+      return cmp;
+    const eidA2 = parseInt(a.labelB, 10) || 0;
+    const eidB2 = parseInt(b.labelB, 10) || 0;
+    return eidA2 - eidB2;
   });
   for (const pair of collisionPairs) {
     if (pair.entityA?.active === false || pair.entityB?.active === false)
@@ -7235,7 +7312,11 @@ function createBodyFromState(bs) {
   return body;
 }
 function loadWorldState2D(world, state) {
-  const sortedBodies = [...state.bodies].sort((a, b) => a.label.localeCompare(b.label));
+  const sortedBodies = [...state.bodies].sort((a, b) => {
+    const eidA = parseInt(a.label, 10) || 0;
+    const eidB = parseInt(b.label, 10) || 0;
+    return eidA - eidB;
+  });
   const snapshotLabels = new Set(sortedBodies.map((bs) => bs.label));
   for (let i = world.bodies.length - 1; i >= 0; i--) {
     if (!snapshotLabels.has(world.bodies[i].label)) {
@@ -7272,7 +7353,11 @@ function loadWorldState2D(world, state) {
   if (maxId >= currentCounter) {
     setBody2DIdCounter(maxId + 1);
   }
-  world.bodies.sort((a, b) => a.label.localeCompare(b.label));
+  world.bodies.sort((a, b) => {
+    const eidA = parseInt(a.label, 10) || 0;
+    const eidB = parseInt(b.label, 10) || 0;
+    return eidA - eidB;
+  });
 }
 
 // src/plugins/physics2d/quad-tree.ts
@@ -7534,7 +7619,14 @@ var TriggerState = class {
   processOverlaps(currentOverlaps) {
     const currentKeys = /* @__PURE__ */ new Set();
     const sortedOverlaps = [...currentOverlaps].sort((a, b) => {
-      return this.makeKey(a.trigger, a.other).localeCompare(this.makeKey(b.trigger, b.other));
+      const eidTriggerA = parseInt(a.trigger.label, 10) || 0;
+      const eidTriggerB = parseInt(b.trigger.label, 10) || 0;
+      const cmp = eidTriggerA - eidTriggerB;
+      if (cmp !== 0)
+        return cmp;
+      const eidOtherA = parseInt(a.other.label, 10) || 0;
+      const eidOtherB = parseInt(b.other.label, 10) || 0;
+      return eidOtherA - eidOtherB;
     });
     for (const overlap of sortedOverlaps) {
       const key = this.makeKey(overlap.trigger, overlap.other);
@@ -7583,7 +7675,11 @@ var TriggerState = class {
         bodies.push(overlap.other);
       }
     }
-    return bodies.sort((a, b) => a.label.localeCompare(b.label));
+    return bodies.sort((a, b) => {
+      const eidA = parseInt(a.label, 10) || 0;
+      const eidB = parseInt(b.label, 10) || 0;
+      return eidA - eidB;
+    });
   }
   isBodyInTrigger(trigger, body) {
     return this.overlaps.has(this.makeKey(trigger, body));
@@ -7596,7 +7692,16 @@ var TriggerState = class {
     for (const overlap of this.overlaps.values()) {
       pairs.push([overlap.trigger.label, overlap.other.label]);
     }
-    return pairs.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+    return pairs.sort((a, b) => {
+      const eid1A = parseInt(a[0], 10) || 0;
+      const eid1B = parseInt(b[0], 10) || 0;
+      const cmp = eid1A - eid1B;
+      if (cmp !== 0)
+        return cmp;
+      const eid2A = parseInt(a[1], 10) || 0;
+      const eid2B = parseInt(b[1], 10) || 0;
+      return eid2A - eid2B;
+    });
   }
   loadState(pairs) {
     this.overlaps.clear();
@@ -7915,12 +8020,14 @@ var Physics2DSystem = class {
    * Used during snapshot restoration to ensure fresh physics state.
    */
   clear() {
+    const bodyCount = this.entityToBody.size;
     for (const body of this.entityToBody.values()) {
       removeBody2D(this.physicsWorld, body);
     }
     this.entityToBody.clear();
     this.bodyToEntity.clear();
     resetBody2DIdCounter();
+    console.log(`[PHYSICS-CLEAR] Cleared ${bodyCount} bodies`);
   }
   /**
    * Wake all physics bodies.
@@ -7949,17 +8056,23 @@ var Physics2DSystem = class {
     if (!this.world)
       return;
     const entitiesWithBody2D = [...this.world.query(Body2D)].sort((a, b) => a.eid - b.eid);
+    const bodiesExistedBefore = this.entityToBody.size;
     if (this.entityToBody.size === 0 && entitiesWithBody2D.length > 0) {
+      console.log(`[PHYSICS-SYNC] Creating ${entitiesWithBody2D.length} bodies from scratch`);
       for (const entity of entitiesWithBody2D) {
         this.ensureBody(entity);
       }
     }
+    let syncedCount = 0;
     for (const [eid, body] of this.entityToBody) {
       const entity = this.world.getEntity(eid);
       if (!entity || entity.destroyed)
         continue;
       const transform = entity.get(Transform2D);
       const bodyData = entity.get(Body2D);
+      if (syncedCount < 3) {
+        console.log(`[PHYSICS-SYNC] Body ${eid}: pos(${transform.x.toFixed(1)},${transform.y.toFixed(1)}) -> physics`);
+      }
       body.position.x = toFixed(transform.x);
       body.position.y = toFixed(transform.y);
       body.angle = toFixed(transform.angle);
@@ -7968,7 +8081,9 @@ var Physics2DSystem = class {
       body.angularVelocity = toFixed(bodyData.angularVelocity);
       body.isSleeping = false;
       body.sleepFrames = 0;
+      syncedCount++;
     }
+    console.log(`[PHYSICS-SYNC] Synced ${syncedCount} bodies (existed before: ${bodiesExistedBefore})`);
   }
 };
 function createPhysics2DSystem(config = {}) {

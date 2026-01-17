@@ -80,6 +80,7 @@ export class Game {
         this.lastSnapshotFrame = 0;
         this.lastSnapshotSize = 0;
         this.lastSnapshotEntityCount = 0;
+        this.snapshotLoadedFrame = 0; // Frame when snapshot was loaded (for debug timing)
         /** Drift tracking stats for debug UI */
         this.driftStats = {
             determinismPercent: 100,
@@ -596,10 +597,6 @@ export class Game {
         // Server sends majorityHash for frame-1 (see input-batcher.ts)
         // We look up our cached hash for that frame from history
         const localHash = this.stateHashHistory.get(frame);
-        // Debug: log every 100 frames
-        if (frame % 100 === 0) {
-            console.log(`[state-sync] frame=${frame} localHash=${localHash?.toString(16) ?? 'none'} majorityHash=${majorityHash.toString(16)}`);
-        }
         if (localHash === undefined) {
             // Haven't computed hash for this frame yet, skip
             // This happens during initial connection or if history was pruned
@@ -966,7 +963,12 @@ export class Game {
             }
             else {
                 try {
-                    snapshot = decode(snapshot)?.snapshot || null;
+                    const decoded = decode(snapshot);
+                    snapshot = decoded?.snapshot || null;
+                    // CRITICAL: Preserve hash from binary encoding for verification
+                    if (snapshot && decoded?.hash !== undefined) {
+                        snapshot.hash = decoded.hash;
+                    }
                 }
                 catch (e) {
                     console.error('[ecs] Failed to decode snapshot:', e);
@@ -996,16 +998,43 @@ export class Game {
         const hasValidSnapshot = snapshot?.entities && snapshot.entities.length > 0;
         if (hasValidSnapshot) {
             // === LATE JOINER PATH ===
-            if (DEBUG_NETWORK)
-                console.log(`[ecs] Late join: restoring snapshot frame=${snapshot.frame}`);
-            // 1. Restore snapshot
+            console.log(`[LATE JOIN] Restoring snapshot: frame=${snapshot.frame}, entities=${snapshot.entities.length}, serverFrame=${frame}`);
+            // 1. CRITICAL: Build clientId mappings BEFORE loading snapshot!
+            // The snapshot stores numeric clientIds, but we need to map them back to strings
+            // to correctly populate clientsWithEntitiesFromSnapshot.
+            // Process ALL inputs to extract clientIds from join events.
+            let joinCount = 0;
+            for (const input of inputs) {
+                let data = input.data;
+                if (data instanceof Uint8Array) {
+                    try {
+                        data = decode(data);
+                    }
+                    catch {
+                        continue;
+                    }
+                }
+                const inputClientId = data?.clientId || input.clientId;
+                if (inputClientId && (data?.type === 'join' || data?.type === 'reconnect')) {
+                    // Intern the clientId to build numToClientId mapping
+                    this.internClientId(inputClientId);
+                    joinCount++;
+                }
+            }
+            // 2. Restore snapshot (now numToClientId has mappings for clientsWithEntitiesFromSnapshot)
             this.currentFrame = snapshot.frame || frame;
             this.loadNetworkSnapshot(snapshot);
-            // 2. Build authority chain from ALL inputs
+            // Verify loaded state hash matches expected (from authority)
+            const loadedHash = this.world.getStateHash();
+            const expectedHash = snapshot.hash;
+            if (expectedHash !== undefined && loadedHash !== expectedHash) {
+                console.error(`[SNAPSHOT] HASH MISMATCH! loaded=0x${loadedHash.toString(16)} expected=0x${expectedHash?.toString(16)}`);
+            }
+            // 3. Build authority chain from ALL inputs
             for (const input of inputs) {
                 this.processAuthorityChainInput(input);
             }
-            // 3. Call onSnapshot callback
+            // 4. Call onSnapshot callback
             // CRITICAL: onSnapshot runs ONLY on late joiners, so we MUST isolate RNG.
             // Any dRandom() usage here would advance late joiner's RNG while authority's stays unchanged.
             const rngStateSnapshot = saveRandomState();
@@ -1013,19 +1042,43 @@ export class Game {
                 this.callbacks.onSnapshot(this.world.getAllEntities());
             }
             loadRandomState(rngStateSnapshot);
-            // 4. Filter inputs already in snapshot
+            // 5. Filter inputs already in snapshot
             const snapshotSeq = snapshot.seq || 0;
             const pendingInputs = inputs
                 .filter(i => i.seq > snapshotSeq)
                 .sort((a, b) => a.seq - b.seq);
-            // 5. Run catchup simulation
+            // 6. Run catchup simulation
             const snapshotFrame = this.currentFrame;
             const isPostTick = snapshot.postTick === true;
             const startFrame = isPostTick ? snapshotFrame + 1 : snapshotFrame;
             const ticksToRun = frame - startFrame + 1;
+            // CRITICAL: Limit catchup to prevent error accumulation
+            // If too many frames need to be simulated, skip catchup and use snapshot state directly
+            // This prevents desync from accumulated physics errors over many frames
+            const MAX_CATCHUP_FRAMES = 100; // ~5 seconds at 20Hz tick rate
+            if (ticksToRun > MAX_CATCHUP_FRAMES) {
+                console.warn(`[CATCHUP] Skipping ${ticksToRun} frames of catchup (max=${MAX_CATCHUP_FRAMES}). Using snapshot state directly.`);
+                // Just use the snapshot state - don't try to simulate hundreds of frames
+                this.currentFrame = frame;
+                this.lastProcessedFrame = frame;
+                this.clientsWithEntitiesFromSnapshot.clear();
+                // Set up for normal tick processing
+                this.prevSnapshot = this.world.getSparseSnapshot();
+                this.lastGoodSnapshot = {
+                    snapshot: this.prevSnapshot,
+                    frame: frame,
+                    hash: this.world.getStateHash()
+                };
+                console.log(`[LATE JOIN] Skipped catchup, using snapshot at frame=${frame}, hash=0x${this.world.getStateHash().toString(16)}`);
+                return;
+            }
+            // Run catchup simulation
             if (ticksToRun > 0) {
+                console.log(`[LATE JOIN] Starting catchup: ${ticksToRun} frames, ${pendingInputs.length} inputs`);
                 this.runCatchup(startFrame, frame, pendingInputs);
             }
+            console.log(`[LATE JOIN] Catchup complete: frame=${this.currentFrame} hash=0x${this.world.getStateHash().toString(16)}`);
+            this.snapshotLoadedFrame = this.currentFrame; // Track for debug timing
             // CRITICAL: Set prevSnapshot after catchup so delta computation has a valid baseline
             // Without this, late joiner's first delta would compare against stale/null snapshot
             this.prevSnapshot = this.world.getSparseSnapshot();
@@ -1116,11 +1169,24 @@ export class Game {
         const sortedInputs = inputs.length > 1
             ? [...inputs].sort((a, b) => (a.seq || 0) - (b.seq || 0))
             : inputs;
+        // Track join inputs for logging
+        const joinInputs = sortedInputs.filter(i => i.data?.type === 'join');
+        // Log inputs being processed (key for debugging frame alignment)
+        if (sortedInputs.length > 0) {
+            const inputTypes = sortedInputs.map(i => `${i.data?.type || 'game'}@seq${i.seq}`).join(',');
+            console.log(`[TICK-INPUT] frame=${frame} inputs=[${inputTypes}]`);
+        }
         for (const input of sortedInputs) {
             this.processInput(input);
         }
         // 2. Run ECS world tick (systems)
         this.world.tick(frame, []);
+        // Record state hash for desync detection
+        const hashAfter = this.world.getStateHash();
+        // Log hash after tick (for comparing authority vs late joiner)
+        if (sortedInputs.length > 0) {
+            console.log(`[TICK-HASH] frame=${frame} hashAfter=0x${hashAfter.toString(16)}`);
+        }
         // 3. Call game's onTick callback
         this.callbacks.onTick?.(frame);
         // 4. Send deferred snapshot if pending
@@ -1250,11 +1316,6 @@ export class Game {
             if (this.authorityClientId === null) {
                 this.authorityClientId = clientId;
             }
-            // Always log join events for debugging
-            console.log(`[ecs-debug] JOIN: ${clientId.slice(0, 8)} wasActive=${wasActive} activeClients=[${this.activeClients.join(',')}]`);
-            if (DEBUG_NETWORK) {
-                console.log(`[ecs] Join: ${clientId.slice(0, 8)}, authority=${this.authorityClientId?.slice(0, 8)}`);
-            }
             // CRITICAL: Save RNG state before conditional callback.
             // onConnect may be skipped for clients that already have entities from snapshot.
             // If the callback uses dRandom(), we must ensure the global RNG is NOT affected,
@@ -1263,7 +1324,8 @@ export class Game {
             const rngState = saveRandomState();
             // Call callback ONLY if this client doesn't already have an entity from snapshot
             // This prevents duplicate entity creation during catchup
-            if (!this.clientsWithEntitiesFromSnapshot.has(clientId)) {
+            const hasEntityFromSnapshot = this.clientsWithEntitiesFromSnapshot.has(clientId);
+            if (!hasEntityFromSnapshot) {
                 this.callbacks.onConnect?.(clientId);
             }
             // Restore RNG state - callback's random usage doesn't affect global simulation RNG
@@ -1276,7 +1338,6 @@ export class Game {
         else if (type === 'resync_request') {
             // Another client is requesting resync - authority should upload fresh snapshot
             // This ensures resyncing clients get current state, not stale stored snapshot
-            console.log(`[ecs-debug] RESYNC_REQUEST from ${clientId.slice(0, 8)}`);
             if (this.checkIsAuthority()) {
                 this.pendingSnapshotUpload = true;
             }
@@ -1291,16 +1352,16 @@ export class Game {
             if (clientId === this.authorityClientId) {
                 this.authorityClientId = this.activeClients[0] || null;
             }
-            if (DEBUG_NETWORK) {
-                console.log(`[ecs] Leave: ${clientId.slice(0, 8)}, new authority=${this.authorityClientId?.slice(0, 8)}`);
-            }
+            // CRITICAL FIX: Remove from clientsWithEntitiesFromSnapshot on disconnect.
+            this.clientsWithEntitiesFromSnapshot.delete(clientId);
             // CRITICAL: Save/restore RNG around onDisconnect callback.
-            // While onDisconnect typically runs on all clients, we isolate it for safety.
-            // If the callback has conditional logic or error handling that uses dRandom(),
-            // isolating it prevents subtle desyncs.
             const rngStateDisconnect = saveRandomState();
             this.callbacks.onDisconnect?.(clientId);
             loadRandomState(rngStateDisconnect);
+            // CRITICAL FIX: Upload snapshot after disconnect so late joiners get updated state.
+            if (this.checkIsAuthority()) {
+                this.pendingSnapshotUpload = true;
+            }
         }
         else if (data) {
             // Game input - store in world's input registry
@@ -1361,19 +1422,24 @@ export class Game {
      */
     runCatchup(startFrame, endFrame, inputs) {
         const ticksToRun = endFrame - startFrame + 1;
-        if (DEBUG_NETWORK) {
-            console.log(`[ecs] Catchup: ${ticksToRun} ticks from ${startFrame} to ${endFrame}, ${inputs.length} inputs`);
-        }
         // CRITICAL: Sort all inputs by seq to ensure correct order within frames
         // Multiple inputs can occur in a single frame - seq determines order
         const sortedInputs = [...inputs].sort((a, b) => (a.seq || 0) - (b.seq || 0));
+        // Log all inputs with their frame info for debugging
+        console.log(`[CATCHUP-INPUTS] endFrame=${endFrame} inputs:`, sortedInputs.map(i => `seq${i.seq}@frame${i.frame ?? 'NONE'}`).join(', '));
         // Build map of frame -> inputs for that frame (sorted by seq)
         const inputsByFrame = new Map();
         for (const input of sortedInputs) {
-            // CRITICAL: Clamp input frames to catchup range
-            // If input.frame < startFrame, we still need to process it - assign to startFrame
-            // This can happen when snapshot was taken between input creation and tick broadcast
-            const rawFrame = input.frame ?? startFrame;
+            // CRITICAL FIX: Inputs without explicit frames should use endFrame (when they arrived),
+            // NOT startFrame. Using startFrame causes inputs to be processed before catchup starts,
+            // double-applying input state changes that are already in the snapshot.
+            const rawFrame = input.frame ?? endFrame; // FIX: use endFrame instead of startFrame
+            // CRITICAL: Don't process inputs that are AFTER the catchup range
+            // These should be processed during normal ticks, not catchup
+            if (rawFrame > endFrame) {
+                console.log(`[CATCHUP-SKIP] seq=${input.seq} frame=${rawFrame} > endFrame=${endFrame}, will process in normal ticks`);
+                continue; // Skip this input - it will come in future ticks
+            }
             const frame = Math.max(rawFrame, startFrame);
             if (!inputsByFrame.has(frame)) {
                 inputsByFrame.set(frame, []);
@@ -1389,26 +1455,32 @@ export class Game {
             this.currentFrame = tickFrame; // Update so processInput records correct frame
             // Process inputs for this frame (already sorted by seq)
             const frameInputs = inputsByFrame.get(tickFrame) || [];
+            const hashBeforeInputs = this.world.getStateHash();
             for (const input of frameInputs) {
                 this.processInput(input);
             }
+            const hashAfterInputs = this.world.getStateHash();
             // Run world tick
             this.world.tick(tickFrame, []);
+            const hashAfterTick = this.world.getStateHash();
             // Call game's onTick
             this.callbacks.onTick?.(tickFrame);
             // CRITICAL: Record state hash for each catchup frame
-            // This ensures majorityHash comparison works for all frames, not just the final one
-            // Server may send majorityHash for any of these frames during catchup period
-            this.stateHashHistory.set(tickFrame, this.world.getStateHash());
+            this.stateHashHistory.set(tickFrame, hashAfterTick);
+            // Log inputs processed during catchup (key for debugging frame alignment)
+            if (frameInputs.length > 0) {
+                const inputTypes = frameInputs.map(i => `${i.data?.type || 'game'}@seq${i.seq}`).join(',');
+                console.log(`[CATCHUP-INPUT] frame=${tickFrame} inputs=[${inputTypes}] hashAfter=0x${hashAfterTick.toString(16)}`);
+            }
         }
+        // Final hash at end of catchup
+        const finalHash = this.world.getStateHash();
+        console.log(`[CATCHUP-END] frame=${endFrame} hash=0x${finalHash.toString(16)}`);
         this.currentFrame = endFrame;
         this.lastProcessedFrame = endFrame; // Prevent re-processing old frames
         // Clear the snapshot entity tracking - catchup is done
         // Future join events should trigger onConnect normally
         this.clientsWithEntitiesFromSnapshot.clear();
-        if (DEBUG_NETWORK) {
-            console.log(`[ecs] Catchup complete at frame ${this.currentFrame}, hash=${this.getStateHash()}`);
-        }
     }
     // ==========================================
     // Snapshot Methods
@@ -1501,6 +1573,7 @@ export class Game {
             },
             inputState: this.world.getInputState()
         };
+        console.log(`[SNAPSHOT-CREATE] frame=${this.currentFrame} inputState:`, JSON.stringify(this.world.getInputState()));
     }
     /**
      * Load network snapshot into ECS world.
@@ -1525,11 +1598,29 @@ export class Game {
         if (snapshot.strings) {
             this.world.strings.setState(snapshot.strings);
         }
-        // Restore clientId interning
+        // Restore clientId interning - MERGE with existing mappings!
+        // CRITICAL: handleConnect may have already interned clientIds from join inputs
+        // that occurred AFTER the snapshot was taken. We must preserve those.
         if (snapshot.clientIdMap) {
-            this.clientIdToNum = new Map(Object.entries(snapshot.clientIdMap.toNum).map(([k, v]) => [k, v]));
-            this.numToClientId = new Map(Array.from(this.clientIdToNum.entries()).map(([k, v]) => [v, k]));
+            const snapshotMappings = Object.entries(snapshot.clientIdMap.toNum);
+            // Save any NEW clientIds that were interned from join inputs (not in snapshot)
+            const newMappings = [];
+            for (const [clientId, num] of this.clientIdToNum.entries()) {
+                const snapshotHas = snapshotMappings.some(([sid]) => sid === clientId);
+                if (!snapshotHas) {
+                    newMappings.push([clientId, num]);
+                }
+            }
+            // Restore snapshot's mappings (authoritative for entities in snapshot)
+            this.clientIdToNum = new Map(snapshotMappings.map(([k, v]) => [k, v]));
+            this.numToClientId = new Map(snapshotMappings.map(([k, v]) => [v, k]));
             this.nextClientNum = snapshot.clientIdMap.nextNum || 1;
+            // Re-add NEW clientIds with fresh numbers (clients that joined after snapshot)
+            for (const [clientId] of newMappings) {
+                const newNum = this.nextClientNum++;
+                this.clientIdToNum.set(clientId, newNum);
+                this.numToClientId.set(newNum, clientId);
+            }
         }
         // Format 5: type-indexed encoding
         const types = snapshot.types;
@@ -1629,6 +1720,10 @@ export class Game {
         const network = typeof window !== 'undefined' ? window.moduNetwork : undefined;
         for (const entity of this.world.query(Player)) {
             const player = entity.get(Player);
+            if (player.clientId === 0) {
+                // ERROR: clientId=0 should never happen!
+                console.error(`[DEBUG-SNAPSHOT] ERROR: eid=${entity.eid} has Player.clientId=0 (invalid!)`);
+            }
             if (player.clientId !== 0) {
                 const clientIdStr = this.getClientIdString(player.clientId);
                 if (clientIdStr) {
@@ -1667,29 +1762,19 @@ export class Game {
         //
         // syncAllFromComponents() copies position/velocity from ECS components to physics bodies
         // for ALL body types (including dynamic bodies which normal sync skips)
+        // Sync physics bodies from ECS components
         if (this.physics) {
             this.physics.syncAllFromComponents();
         }
-        // CRITICAL: Restore input state so movement systems behave identically
-        // Without this, systems that check `game.world.getInput(clientId)` won't find
-        // the last input, causing movement to stop on late joiners while authority continues
+        // Restore input state so movement systems behave identically
         if (snapshot.inputState) {
             this.world.setInputState(snapshot.inputState);
-        }
-        if (DEBUG_NETWORK) {
-            console.log(`[ecs] Snapshot loaded: ${this.world.getAllEntities().length} entities, hash=${this.getStateHash()}, activeClients=${this.activeClients.length}`);
-            // Debug: log first restored entity
-            const firstEntity = this.world.getAllEntities()[0];
-            if (firstEntity) {
-                const components = {};
-                for (const comp of firstEntity.getComponents()) {
-                    const data = {};
-                    for (const fieldName of comp.fieldNames) {
-                        data[fieldName] = firstEntity.get(comp)[fieldName];
-                    }
-                    components[comp.name] = data;
-                }
-                console.log(`[ecs] Restored first entity: type=${firstEntity.type}, components=`, JSON.stringify(components));
+            // Verify immediately after setting
+            const verifyState = this.world.getInputState();
+            const snapshotKeys = Object.keys(snapshot.inputState).sort().join(',');
+            const loadedKeys = Object.keys(verifyState).sort().join(',');
+            if (snapshotKeys !== loadedKeys) {
+                console.error(`[INPUT-STATE] KEYS DIFFER! snapshot=[${snapshotKeys}] loaded=[${loadedKeys}]`);
             }
         }
     }
@@ -1710,6 +1795,9 @@ export class Game {
         const hash = this.world.getStateHash();
         const binary = encode({ snapshot, hash });
         const entityCount = snapshot.entities.length;
+        // DEBUG: Log snapshot send with input state
+        console.log(`[SNAPSHOT-SEND] source=${source} frame=${snapshot.frame} hash=0x${hash.toString(16)} entities=${entityCount}`);
+        console.log(`[SNAPSHOT-SEND] inputState:`, JSON.stringify(snapshot.inputState || 'MISSING'));
         if (DEBUG_NETWORK) {
             console.log(`[ecs] Sending snapshot (${source}): ${binary.length} bytes, ${entityCount} entities, hash=${hash}`);
         }
