@@ -405,7 +405,9 @@ export class Game {
     enablePrediction(config?: Partial<PredictionConfig>): void {
         if (!this.predictionManager) {
             this.predictionManager = new PredictionManager(this.world, config);
-        } else if (config) {
+        }
+        // Always call enable to set _enabled = true
+        if (config) {
             this.predictionManager.enable(config);
         } else {
             this.predictionManager.enable();
@@ -418,6 +420,19 @@ export class Game {
 
         // Set tick interval
         this.predictionManager.setTickInterval(this.tickIntervalMs);
+
+        // Set up inputs callback to read from world's input registry
+        this.predictionManager.setInputsCallback(() => {
+            const inputState = this.world.getInputState();
+            const inputs = new Map<number, Record<string, any>>();
+            for (const [clientIdStr, data] of Object.entries(inputState)) {
+                const clientId = parseInt(clientIdStr, 10);
+                if (!isNaN(clientId) && data) {
+                    inputs.set(clientId, data as Record<string, any>);
+                }
+            }
+            return inputs;
+        });
 
         console.log('[CSP] Client-side prediction enabled');
     }
@@ -2860,9 +2875,19 @@ export class Game {
 
     /**
      * Send input to network.
+     * When CSP is enabled, also applies input locally for immediate prediction.
      */
     sendInput(input: any): void {
         if (!this.connection) return;
+
+        // When CSP is enabled, apply input locally immediately for prediction
+        if (this.predictionManager?.enabled && this.localClientIdStr) {
+            const numId = this.clientIdToNum.get(this.localClientIdStr);
+            if (numId !== undefined) {
+                this.world.setInput(numId, input);
+            }
+        }
+
         const binary = encode(input);
         this.connection.send(binary);
     }

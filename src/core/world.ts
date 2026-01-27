@@ -1076,6 +1076,9 @@ export class World {
      */
     private applyNetworkInputs(inputs: NetworkInput[]): void {
         for (const input of inputs) {
+            // Always store in input registry so getInput() works
+            this.inputRegistry.set(input.clientId, input.data);
+
             // O(1) lookup via clientIdIndex
             const entity = this.getEntityByClientId(input.clientId);
 

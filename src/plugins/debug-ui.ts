@@ -31,6 +31,10 @@ export interface DebugUITarget {
     getActiveClients?(): string[];
     getDeltaBandwidth?(): number;
     getSyncStats?(): { syncPercent: number; passed: number; failed: number; isDesynced: boolean; resyncPending: boolean };
+    // Prediction/rollback info
+    isPredictionEnabled?(): boolean;
+    getPredictionStats?(): { rollbackCount: number; framesResimulated: number; avgRollbackDepth: number; maxRollbackDepth: number; currentPredictionDepth: number } | null;
+    getTimeSyncStats?(): { clockDelta: number; synced: boolean; sampleCount: number; tickRateMultiplier: number; estimatedLatency: number } | null;
 }
 
 export interface DebugUIOptions {
@@ -55,6 +59,60 @@ let fpsUpdateTime = 0;
  */
 export function setDebugHash(callback: () => string | number): void {
     hashCallback = callback;
+}
+
+/**
+ * Format the prediction/rollback section for debug UI.
+ * Always shows the section, indicates disabled state when CSP is off.
+ */
+function formatPredictionSection(eng: DebugUITarget, sectionStyle: string): string {
+    const isPredEnabled = (eng as any).isPredictionEnabled?.() ?? false;
+    const predStats = (eng as any).getPredictionStats?.() ?? null;
+    const timeSyncStats = (eng as any).getTimeSyncStats?.() ?? null;
+
+    let html = `<div style="${sectionStyle}">PREDICTION</div>`;
+
+    if (!isPredEnabled) {
+        html += `<div>CSP: <span style="color:#888">disabled</span></div>`;
+        html += `<div>Rollbacks: <span style="color:#888">-</span></div>`;
+        html += `<div>Latency: <span style="color:#888">-</span></div>`;
+        return html;
+    }
+
+    if (predStats) {
+        const depth = predStats.currentPredictionDepth;
+        const depthColor = depth <= 4 ? '#0f0' : depth <= 8 ? '#ff0' : '#f00';
+
+        html += `<div>Depth: <span style="color:${depthColor}">${depth}</span> frames ahead</div>`;
+
+        if (predStats.rollbackCount > 0) {
+            html += `<div>Rollbacks: <span style="color:#f80">${predStats.rollbackCount}</span></div>`;
+            html += `<div>Resim: <span style="color:#f80">${predStats.framesResimulated}</span> frames</div>`;
+            html += `<div>Avg depth: <span style="color:#888">${predStats.avgRollbackDepth.toFixed(1)}</span></div>`;
+            html += `<div>Max depth: <span style="color:#888">${predStats.maxRollbackDepth}</span></div>`;
+        } else {
+            html += `<div>Rollbacks: <span style="color:#0f0">0</span></div>`;
+        }
+    } else {
+        html += `<div>Depth: <span style="color:#888">-</span></div>`;
+        html += `<div>Rollbacks: <span style="color:#888">-</span></div>`;
+    }
+
+    if (timeSyncStats) {
+        const latency = Math.round(timeSyncStats.estimatedLatency);
+        const latencyColor = latency < 50 ? '#0f0' : latency < 100 ? '#ff0' : '#f00';
+        const syncColor = timeSyncStats.synced ? '#0f0' : '#f80';
+        const rateMultiplier = timeSyncStats.tickRateMultiplier;
+        const rateColor = Math.abs(rateMultiplier - 1.0) < 0.01 ? '#0f0' : '#ff0';
+
+        html += `<div>Latency: <span style="color:${latencyColor}">${latency}ms</span></div>`;
+        html += `<div>Synced: <span style="color:${syncColor}">${timeSyncStats.synced ? 'yes' : 'no'}</span> <span style="color:#888">(${timeSyncStats.sampleCount} samples)</span></div>`;
+        html += `<div>Rate: <span style="color:${rateColor}">${rateMultiplier.toFixed(3)}x</span></div>`;
+    } else {
+        html += `<div>Latency: <span style="color:#888">-</span></div>`;
+    }
+
+    return html;
 }
 
 /**
@@ -219,6 +277,7 @@ export function enableDebugUI(target?: DebugUITarget, options: DebugUIOptions = 
             <div>Delta: <span style="color:#0ff">${deltaBwStr}</span></div>
             <div>Sync: ${syncStatus}</div>
             <div>Entities: <span style="color:#fff">${entityStr}</span></div>
+            ${formatPredictionSection(eng, sectionStyle)}
         `;
     };
 
