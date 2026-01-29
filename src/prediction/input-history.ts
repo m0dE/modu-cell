@@ -247,26 +247,27 @@ export class InputHistory {
 
     /**
      * Get all inputs for a frame (for simulation).
-     * Fills in predictions for any missing clients.
+     * Fills in predictions for any missing clients and stores them for later comparison.
      *
      * @param frame - Frame to get inputs for
      * @returns Map of clientId to input data
      */
     getFrameInputs(frame: number): Map<number, Record<string, any>> {
         const result = new Map<number, Record<string, any>>();
-        const frameSet = this.getFrameSet(frame);
+        const frameSet = this.getOrCreateFrameSet(frame);
 
         // Add all existing inputs
-        if (frameSet) {
-            for (const [clientId, input] of frameSet.inputs) {
-                result.set(clientId, input.data);
-            }
+        for (const [clientId, input] of frameSet.inputs) {
+            result.set(clientId, input.data);
         }
 
-        // Fill in predictions for missing active clients
+        // Fill in predictions for missing active clients and STORE them
         for (const clientId of this.activeClients) {
             if (!result.has(clientId)) {
-                result.set(clientId, this.getPredictedInput(frame, clientId));
+                const predicted = this.getPredictedInput(frame, clientId);
+                result.set(clientId, predicted);
+                // Store the prediction so confirmInput can compare against it
+                this.storePredictedInput(frame, clientId, predicted);
             }
         }
 

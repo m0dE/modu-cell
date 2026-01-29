@@ -421,18 +421,13 @@ export class Game {
         // Set tick interval
         this.predictionManager.setTickInterval(this.tickIntervalMs);
 
-        // Set up inputs callback to read from world's input registry
-        this.predictionManager.setInputsCallback(() => {
-            const inputState = this.world.getInputState();
-            const inputs = new Map<number, Record<string, any>>();
-            for (const [clientIdStr, data] of Object.entries(inputState)) {
-                const clientId = parseInt(clientIdStr, 10);
-                if (!isNaN(clientId) && data) {
-                    inputs.set(clientId, data as Record<string, any>);
-                }
+        // Add existing clients to prediction tracking
+        for (const clientId of this.activeClients) {
+            const numId = this.clientIdToNum.get(clientId);
+            if (numId !== undefined) {
+                this.predictionManager.addClient(clientId);
             }
-            return inputs;
-        });
+        }
 
         console.log('[CSP] Client-side prediction enabled');
     }
@@ -1868,6 +1863,11 @@ export class Game {
                 this.callbacks.onConnect?.(clientId);
                 loadRandomState(rngState);
 
+                // Add to prediction tracking if CSP is enabled
+                if (this.predictionManager?.enabled) {
+                    this.predictionManager.addClient(clientId);
+                }
+
                 // Mark snapshot needed
                 if (this.checkIsAuthority()) {
                     this.pendingSnapshotUpload = true;
@@ -1895,6 +1895,11 @@ export class Game {
                 const rngStateDisconnect = saveRandomState();
                 this.callbacks.onDisconnect?.(clientId);
                 loadRandomState(rngStateDisconnect);
+
+                // Remove from prediction tracking if CSP is enabled
+                if (this.predictionManager?.enabled) {
+                    this.predictionManager.removeClient(clientId);
+                }
 
                 // CRITICAL FIX: Upload snapshot after disconnect so late joiners get updated state.
                 if (this.checkIsAuthority()) {
@@ -2875,16 +2880,20 @@ export class Game {
 
     /**
      * Send input to network.
-     * When CSP is enabled, also applies input locally for immediate prediction.
+     * When CSP is enabled, also applies input locally for immediate prediction
+     * and queues it in the prediction manager's input history.
      */
     sendInput(input: any): void {
         if (!this.connection) return;
 
-        // When CSP is enabled, apply input locally immediately for prediction
+        // When CSP is enabled, apply input locally and queue for prediction
         if (this.predictionManager?.enabled && this.localClientIdStr) {
             const numId = this.clientIdToNum.get(this.localClientIdStr);
             if (numId !== undefined) {
+                // Apply immediately for visual feedback
                 this.world.setInput(numId, input);
+                // Queue in prediction manager for input history tracking
+                this.predictionManager.queueLocalInput(input);
             }
         }
 
