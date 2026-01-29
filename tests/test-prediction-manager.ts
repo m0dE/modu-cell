@@ -391,59 +391,165 @@ test('returns correct predictionDepth', () => {
 
 console.log('\nTest 8: Lifecycle rollback undo/replay');
 
-test('onLifecycleEvent called during rollback resimulation at correct frame', () => {
-    const { pm } = createPM({ inputDelayFrames: 0 });
+test('lifecycle event replayed at correct frame during resimulation', () => {
+    const { pm, world } = createPM({ inputDelayFrames: 0 });
     pm.enable();
 
-    const lifecycleFrames: number[] = [];
+    // Track tick count when lifecycle event fires during resimulation
+    // This tells us which resim frame the event was replayed at
+    let tickCountAtLifecycleReplay = -1;
     pm.onLifecycleEvent = (input) => {
-        // Track which frame the lifecycle event fires during resim
-        lifecycleFrames.push(pm.localFrame);
+        tickCountAtLifecycleReplay = world.tickCalls.length;
     };
+    pm.onUndoLifecycleEvent = () => {};
+
+    pm.advanceFrame(); // 1 (tick 1)
+    pm.advanceFrame(); // 2 (tick 2)
+    pm.advanceFrame(); // 3 (tick 3)
+    // 3 original ticks
+
+    // Join at frame 2 — rollback loads snapshot at frame 1, then resimulates 2,3
+    // Lifecycle event should fire BEFORE the tick for frame 2
+    pm.receiveServerTick(2, [
+        { seq: 1, clientId: '5', data: { type: 'join' } },
+    ]);
+
+    // After rollback: 3 original + 2 resim ticks = 5 total
+    // Lifecycle fires before resim frame 2's tick, so at tick count 3 (after original 3)
+    return tickCountAtLifecycleReplay === 3;
+});
+
+test('lifecycle event NOT replayed at wrong frame', () => {
+    const { pm, world } = createPM({ inputDelayFrames: 0 });
+    pm.enable();
+
+    let lifecycleCallCount = 0;
+    pm.onLifecycleEvent = () => { lifecycleCallCount++; };
     pm.onUndoLifecycleEvent = () => {};
 
     pm.advanceFrame(); // 1
     pm.advanceFrame(); // 2
     pm.advanceFrame(); // 3
 
-    // Join at frame 2 — triggers rollback, replays at frame 2 during resim
+    // Join at frame 2 — should replay exactly once during resimulation
     pm.receiveServerTick(2, [
         { seq: 1, clientId: '5', data: { type: 'join' } },
     ]);
 
-    // onLifecycleEvent should have been called during resimulation
-    return lifecycleFrames.length >= 1;
+    // Resimulates frames 2 and 3, but lifecycle is only at frame 2
+    return lifecycleCallCount === 1;
 });
 
-test('onUndoLifecycleEvent called before rollback in reverse order', () => {
-    const { pm } = createPM({ inputDelayFrames: 0 });
+test('undo happens in reverse frame order before rollback', () => {
+    const { pm } = createPM({ inputDelayFrames: 0, maxPredictionFrames: 10 });
     pm.enable();
+    pm.addClient(2);
 
-    const undoEvents: string[] = [];
+    const undoClientIds: string[] = [];
     pm.onLifecycleEvent = () => {};
     pm.onUndoLifecycleEvent = (input) => {
-        undoEvents.push(input.data.type);
+        undoClientIds.push(input.clientId);
     };
 
     pm.advanceFrame(); // 1
     pm.advanceFrame(); // 2
+    pm.advanceFrame(); // 3
 
-    // Two lifecycle events at different frames
+    // Place lifecycle events at frames 1 and 3 via sequential server ticks
     pm.receiveServerTick(1, [
         { seq: 1, clientId: '5', data: { type: 'join' } },
     ]);
-    // Reset tracking for second rollback
-    undoEvents.length = 0;
+    undoClientIds.length = 0; // reset after first rollback
 
-    pm.receiveServerTick(2, [
+    pm.receiveServerTick(3, [
         { seq: 2, clientId: '6', data: { type: 'join' } },
     ]);
+    undoClientIds.length = 0; // reset after second rollback
 
-    // Second rollback to frame 2 should undo frame 2's join event
-    return undoEvents.length >= 1;
+    // Trigger rollback to frame 1 via a game input misprediction for tracked client 2
+    pm.receiveServerTick(1, [
+        { seq: 3, clientId: '2', data: { moveX: 999 } },
+    ]);
+
+    // Undo should process frame 3 first (client 6), then frame 1 (client 5)
+    return undoClientIds.length === 2 &&
+           undoClientIds[0] === '6' &&
+           undoClientIds[1] === '5';
 });
 
-test('lifecycle + game input misprediction both trigger rollback', () => {
+test('lifecycle + game input misprediction both trigger rollback with correct resim', () => {
+    const { pm, world } = createPM({ inputDelayFrames: 0 });
+    pm.enable();
+    pm.addClient(2);
+
+    let lifecycleFired = false;
+    pm.onLifecycleEvent = () => { lifecycleFired = true; };
+    pm.onUndoLifecycleEvent = () => {};
+
+    pm.advanceFrame(); // 1
+    pm.advanceFrame(); // 2
+
+    const ticksBefore = world.tickCalls.length; // 2
+
+    // Both a lifecycle event and a game input misprediction at frame 1
+    const result = pm.receiveServerTick(1, [
+        { seq: 1, clientId: '5', data: { type: 'join' } },
+        { seq: 2, clientId: '2', data: { moveX: 999 } },
+    ]);
+
+    // Should rollback and resimulate frames 1+2 = 2 extra ticks
+    return result === true &&
+           world.tickCalls.length === ticksBefore + 2 &&
+           lifecycleFired;
+});
+
+test('executeRollback with missing snapshot does not crash', () => {
+    const { pm } = createPM({ inputDelayFrames: 0 });
+    pm.enable();
+
+    // Call executeRollback directly for a frame with no saved snapshot
+    const originalWarn = console.warn;
+    let warned = false;
+    console.warn = () => { warned = true; };
+    try {
+        pm.executeRollback(50); // no snapshot at frame 49
+        return warned;
+    } finally {
+        console.warn = originalWarn;
+    }
+});
+
+test('resimulation ticks correct frames with corrected inputs', () => {
+    const { pm, world } = createPM({ inputDelayFrames: 0 });
+    pm.enable();
+    pm.addClient(2);
+
+    pm.onLifecycleEvent = () => {};
+    pm.onUndoLifecycleEvent = () => {};
+
+    pm.advanceFrame(); // 1 — client 2 predicted as empty
+    pm.advanceFrame(); // 2
+    pm.advanceFrame(); // 3
+
+    // Server says client 2 had moveX:999 at frame 1
+    pm.receiveServerTick(1, [
+        { seq: 1, clientId: '2', data: { moveX: 999 } },
+    ]);
+
+    // Resimulation should tick frames 1, 2, 3
+    const resimTicks = world.tickCalls.slice(3); // skip the 3 original ticks
+    if (resimTicks.length !== 3) return false;
+    if (resimTicks[0].frame !== 1) return false;
+    if (resimTicks[1].frame !== 2) return false;
+    if (resimTicks[2].frame !== 3) return false;
+
+    // Frame 1's resim should include client 2's confirmed input
+    const frame1Inputs = resimTicks[0].inputs;
+    const client2Input = frame1Inputs.find((i: any) => i.clientId === 2);
+    return client2Input?.data?.moveX === 999;
+});
+
+test('resimulation saves corrected snapshots', () => {
     const { pm, world } = createPM({ inputDelayFrames: 0 });
     pm.enable();
     pm.addClient(2);
@@ -454,15 +560,18 @@ test('lifecycle + game input misprediction both trigger rollback', () => {
     pm.advanceFrame(); // 1
     pm.advanceFrame(); // 2
 
-    const ticksBefore = world.tickCalls.length;
-
-    // Both a lifecycle event and a game input misprediction at frame 1
-    const result = pm.receiveServerTick(1, [
-        { seq: 1, clientId: '5', data: { type: 'join' } },
-        { seq: 2, clientId: '2', data: { moveX: 999 } },
+    // Trigger rollback via misprediction — resimulation should save snapshots
+    pm.receiveServerTick(1, [
+        { seq: 1, clientId: '2', data: { moveX: 999 } },
     ]);
 
-    return result === true && world.tickCalls.length > ticksBefore;
+    // After resimulation, trigger another rollback via lifecycle event at frame 1
+    // Lifecycle events always force rollback for past frames, regardless of confirmInput
+    const result = pm.receiveServerTick(1, [
+        { seq: 2, clientId: '8', data: { type: 'join' } },
+    ]);
+    // If snapshots were saved during resim, rollback succeeds without crash
+    return result === true;
 });
 
 // ============================================
