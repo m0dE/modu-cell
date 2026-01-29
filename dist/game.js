@@ -231,9 +231,6 @@ var CellEater = (() => {
       }
       for (const [clientId, cells] of sortedPlayers) {
         const playerInput = game2.world.getInput(clientId);
-        if (game2.world.frame % 60 === 0 && cells.length > 0) {
-          console.log(`[MOVE] clientId=${clientId}, cells=${cells.length}, hasInput=${!!playerInput}, hasTarget=${!!playerInput?.target}`);
-        }
         for (const cell of cells) {
           const sprite = cell.get(modu2.Sprite);
           const transform = cell.get(modu2.Transform2D);
@@ -718,7 +715,9 @@ var CellEater = (() => {
       sizeDisplay,
       getLocalClientId
     );
-    game.connect("cell-eater-ecs", {
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomId = urlParams.get("room") || "cell-eater-ecs";
+    game.connect(roomId, {
       onRoomCreate() {
         console.log("[cell-eater] onRoomCreate");
         for (let i = 0; i < FOOD_COUNT; i++)
@@ -746,6 +745,7 @@ var CellEater = (() => {
       }
     });
     modu4.enableDebugUI(game);
+    game.enablePrediction();
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initGame);
