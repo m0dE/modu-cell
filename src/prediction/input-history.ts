@@ -123,7 +123,7 @@ export class InputHistory {
     /**
      * Get the FrameInputSet for a frame (if it exists).
      */
-    private getFrameSet(frame: number): FrameInputSet | null {
+    getFrameSet(frame: number): FrameInputSet | null {
         const index = this.getIndex(frame);
         const frameSet = this.buffer[index];
         if (frameSet && frameSet.frame === frame) {

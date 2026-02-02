@@ -486,6 +486,10 @@ export class Game {
         return this.predictionManager?.getEstimatedLatency() ?? 0;
     }
 
+    getPredictionManager(): PredictionManager | null {
+        return this.predictionManager;
+    }
+
     // ==========================================
     // Entity Definition API
     // ==========================================
@@ -1534,6 +1538,12 @@ export class Game {
 
             this.snapshotLoadedFrame = this.currentFrame;  // Track for debug timing
 
+            // Re-set prediction manager's local client ID — snapshot load rebuilt the ID map
+            if (this.predictionManager && this.localClientIdStr) {
+                const localNumId = this.internClientId(this.localClientIdStr);
+                this.predictionManager.setLocalClientId(localNumId);
+            }
+
             // CRITICAL: Set prevSnapshot after catchup so delta computation has a valid baseline
             // Without this, late joiner's first delta would compare against stale/null snapshot
             this.prevSnapshot = this.world.getSparseSnapshot();
@@ -1588,6 +1598,13 @@ export class Game {
             // which will call onConnect and add us to activeClients
             for (const input of inputs) {
                 this.processInput(input);
+            }
+
+            // Re-set prediction manager's local client ID after map rebuild
+            // (internClientId was called at line ~1415 before the map was reset)
+            if (this.predictionManager && this.localClientIdStr) {
+                const localNumId = this.internClientId(this.localClientIdStr);
+                this.predictionManager.setLocalClientId(localNumId);
             }
 
             // CRITICAL: Run initial tick to execute systems and compute initial hash

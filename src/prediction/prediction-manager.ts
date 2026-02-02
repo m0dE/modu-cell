@@ -149,6 +149,14 @@ export class PredictionManager {
         return this.timeSyncManager;
     }
 
+    getInputHistory(): InputHistory {
+        return this.inputHistory;
+    }
+
+    getLocalClientId(): number {
+        return this.localClientId;
+    }
+
     /**
      * Get prediction statistics.
      */

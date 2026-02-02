@@ -9,3 +9,4 @@ export * from './debug-ui';
 export { Physics2DSystem } from './physics2d/system';
 export * as physics2d from './physics2d';
 export * as physics3d from './physics3d';
+export { PredictionDebugPlugin, PredictionDebugOptions } from './prediction-debug';

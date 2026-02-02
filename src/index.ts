@@ -81,6 +81,8 @@ export { InputPlugin } from './plugins/input-plugin';
 export { CameraSystem, CameraSystemOptions } from './plugins/camera-system';
 export { enableDebugUI, DebugUITarget } from './plugins/debug-ui';
 export { enableDeterminismGuard, disableDeterminismGuard } from './plugins/determinism-guard';
+export { PredictionDebugPlugin } from './plugins/prediction-debug';
+export type { PredictionDebugOptions } from './plugins/prediction-debug';
 export { Physics2DSystem, createPhysics2DSystem } from './plugins/physics2d/system';
 export type { Physics2DSystemConfig } from './plugins/physics2d/system';
 
