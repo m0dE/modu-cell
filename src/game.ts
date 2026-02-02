@@ -1676,6 +1676,14 @@ export class Game {
             this.currentFrame = frame;
             this.lastProcessedFrame = frame;
 
+            // Send cached hash for the confirmed frame to the server for majority comparison.
+            // The hash was recorded by onFrameResimulated during rollback, or during
+            // the original advanceFrame if no rollback occurred.
+            const cachedHash = this.stateHashHistory.get(frame);
+            if (cachedHash !== undefined && this.connection?.sendStateHash) {
+                this.connection.sendStateHash(frame, cachedHash);
+            }
+
             // Still need to handle majority hash for desync detection
             if (majorityHash !== undefined && majorityHash !== 0) {
                 const hashFrame = frame - 1;
@@ -1763,27 +1771,6 @@ export class Game {
             (this.connection as any).sendSyncTimestamp(syncTimestamp);
             this.lastTimeSyncTime = syncTimestamp;
             console.log('[CSP] Started time sync');
-        }
-    }
-
-    /**
-     * Send only the state hash for a predicted frame (no partition deltas —
-     * predicted state may change on rollback making deltas wrong).
-     */
-    private sendStateHash(frame: number): void {
-        if (!this.stateSyncEnabled || !this.connection?.sendStateHash) return;
-
-        const stateHash = this.world.getStateHash();
-        this.connection.sendStateHash(frame, stateHash);
-
-        this.stateHashHistory.set(frame, stateHash);
-        if (this.stateHashHistory.size > this.HASH_HISTORY_SIZE) {
-            const oldestFrame = frame - this.HASH_HISTORY_SIZE;
-            for (const f of this.stateHashHistory.keys()) {
-                if (f <= oldestFrame) {
-                    this.stateHashHistory.delete(f);
-                }
-            }
         }
     }
 
@@ -2847,7 +2834,16 @@ export class Game {
                 // Run prediction ticks (may run multiple if we're behind)
                 while (tickAccumulator >= adjustedInterval) {
                     this.predictionManager.advanceFrame();
-                    this.sendStateHash(this.predictionManager.localFrame);
+
+                    // Cache state hash for the predicted frame (for later confirmation)
+                    const pFrame = this.predictionManager.localFrame;
+                    this.stateHashHistory.set(pFrame, this.world.getStateHash());
+                    if (this.stateHashHistory.size > this.HASH_HISTORY_SIZE) {
+                        const oldest = pFrame - this.HASH_HISTORY_SIZE;
+                        for (const f of this.stateHashHistory.keys()) {
+                            if (f <= oldest) this.stateHashHistory.delete(f);
+                        }
+                    }
 
                     // Call game's onTick callback with predicted frame
                     this.callbacks.onTick?.(this.predictionManager.localFrame);
