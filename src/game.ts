@@ -1774,6 +1774,16 @@ export class Game {
         }
     }
 
+    private cacheFrameHash(frame: number): void {
+        this.stateHashHistory.set(frame, this.world.getStateHash());
+        if (this.stateHashHistory.size > this.HASH_HISTORY_SIZE) {
+            const oldest = frame - this.HASH_HISTORY_SIZE;
+            for (const f of this.stateHashHistory.keys()) {
+                if (f <= oldest) this.stateHashHistory.delete(f);
+            }
+        }
+    }
+
     /**
      * Send state synchronization data after tick.
      * Sends stateHash to server, and partition data if this client is assigned.
@@ -2831,19 +2841,28 @@ export class Game {
                 const adjustedInterval = this.predictionManager.getAdjustedTickInterval();
                 tickAccumulator += deltaTime;
 
+                // Target prediction depth: stay ahead by full RTT worth of frames.
+                // getEstimatedLatency() returns one-way (RTT/2), so double it.
+                const rttMs = this.predictionManager.getEstimatedLatency() * 2;
+                const targetDepth = Math.max(1, Math.ceil(rttMs / this.tickIntervalMs));
+                const currentDepth = this.predictionManager.localFrame - this.predictionManager.confirmedFrame;
+
+                // If we're behind the target depth (e.g. after time sync establishes
+                // latency or after a lag spike), catch up by injecting extra ticks.
+                if (currentDepth < targetDepth) {
+                    const catchupFrames = targetDepth - currentDepth;
+                    for (let i = 0; i < catchupFrames; i++) {
+                        this.predictionManager.advanceFrame();
+                        this.cacheFrameHash(this.predictionManager.localFrame);
+                        this.callbacks.onTick?.(this.predictionManager.localFrame);
+                    }
+                }
+
                 // Run prediction ticks (may run multiple if we're behind)
                 while (tickAccumulator >= adjustedInterval) {
                     this.predictionManager.advanceFrame();
 
-                    // Cache state hash for the predicted frame (for later confirmation)
-                    const pFrame = this.predictionManager.localFrame;
-                    this.stateHashHistory.set(pFrame, this.world.getStateHash());
-                    if (this.stateHashHistory.size > this.HASH_HISTORY_SIZE) {
-                        const oldest = pFrame - this.HASH_HISTORY_SIZE;
-                        for (const f of this.stateHashHistory.keys()) {
-                            if (f <= oldest) this.stateHashHistory.delete(f);
-                        }
-                    }
+                    this.cacheFrameHash(this.predictionManager.localFrame);
 
                     // Call game's onTick callback with predicted frame
                     this.callbacks.onTick?.(this.predictionManager.localFrame);
