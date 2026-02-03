@@ -128,11 +128,12 @@ describe('Resync clears snapshot tracking', () => {
         console.log('\n=== PASS: clientsWithEntitiesFromSnapshot correctly cleared after resync ===');
     });
 
-    test('without fix: client join after resync would incorrectly skip onConnect', () => {
-        console.log('\n=== Test: Verify the bug scenario (without fix) ===\n');
+    test('duplicate join after resync correctly skips onConnect (client still active)', () => {
+        console.log('\n=== Test: Duplicate join after resync ===\n');
 
-        // This test documents what WOULD happen without the fix
-        // The fix ensures this scenario works correctly
+        // After resync, clients from the snapshot are still in activeClients.
+        // A duplicate join for an already-active client should NOT call onConnect.
+        // This is correct behavior - onConnect is for NEW connections.
 
         const conn = createMockConnection('client-a');
         const game = new Game();
@@ -176,18 +177,20 @@ describe('Resync clears snapshot tracking', () => {
         console.log(`Entities after resync: ${entitiesAfterResync}`);
         expect(entitiesAfterResync).toBe(entitiesBeforeResync);
 
-        // Now if client-b joins AGAIN (e.g., server sends duplicate join),
-        // onConnect should be called (because client-b might have disconnected and rejoined)
-        // With the fix, clientsWithEntitiesFromSnapshot is empty, so onConnect IS called
-        // Without the fix, clientsWithEntitiesFromSnapshot would contain client-b, so onConnect would be SKIPPED
+        // client-b is still in activeClients after resync (from snapshot)
+        const activeClients = (game as any).activeClients;
+        expect(activeClients).toContain('client-b');
+        console.log(`activeClients after resync: [${activeClients.join(', ')}]`);
 
+        // A duplicate join for client-b should NOT trigger onConnect
+        // (client-b is already active, no disconnect happened)
         (game as any).processInput({ seq: 3, clientId: 'client-b', data: { type: 'join', clientId: 'client-b' } });
 
-        // With fix: onConnect is called, client-b gets a new entity
-        // This might create a duplicate, but that's the expected behavior for a rejoin
-        expect(onConnectCalls).toContain('client-b');
+        // onConnect should NOT be called - client-b was already active
+        expect(onConnectCalls).not.toContain('client-b');
+        expect(onConnectCalls.length).toBe(0);
 
-        console.log(`onConnect calls after "rejoin": [${onConnectCalls.join(', ')}]`);
-        console.log('(With fix: onConnect IS called, which is correct for a rejoin)');
+        console.log(`onConnect calls after duplicate join: [${onConnectCalls.join(', ')}]`);
+        console.log('(Correct: onConnect NOT called for already-active client)');
     });
 });
